@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# finops-agent runtime
+*.db
+*.db-journal
+
+# Secrets — never commit these
+config.yaml
+*.json
+!tests/fixtures/*.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
