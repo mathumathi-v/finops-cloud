@@ -28,8 +28,8 @@ class WasteFinding:
     detected_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
-_DISK_SERVICES = {"EBS", "PersistentDisk", "ManagedDisk"}
-_COMPUTE_SERVICES = {"EC2", "GCE", "VirtualMachine"}
+_DISK_SERVICES = {"EBS", "PersistentDisk", "ManagedDisk", "BlockVolume"}
+_COMPUTE_SERVICES = {"EC2", "GCE", "VirtualMachine", "Compute"}
 
 
 def detect_unattached_disks(resources: list[ResourceSnapshot]) -> list[WasteFinding]:

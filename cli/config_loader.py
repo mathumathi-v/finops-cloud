@@ -103,6 +103,7 @@ def _default_config() -> dict[str, Any]:
         },
         "gcp": {"enabled": False},
         "azure": {"enabled": False},
+        "oci": {"enabled": False},
         "llm": {
             "provider": "openai",
             "api_key": "",

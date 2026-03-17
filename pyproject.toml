@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "finops-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "Open-source, CLI-first, multi-cloud infrastructure cost reasoning agent"
 readme = "README.md"
 license = "Apache-2.0"
@@ -12,7 +12,7 @@ requires-python = ">= 3.11"
 authors = [
     { name = "finops-agent contributors" },
 ]
-keywords = ["finops", "cloud", "cost", "aws", "cli"]
+keywords = ["finops", "cloud", "cost", "aws", "azure", "oci", "cli"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Programming Language :: Python :: 3.11",
@@ -43,6 +43,11 @@ azure = [
     "azure-mgmt-network >= 25.0",
     "azure-mgmt-containerservice >= 28.0",
     "azure-mgmt-resource >= 23.0",
+    "azure-mgmt-storage >= 21.0",
+    "azure-mgmt-web >= 7.0",
+]
+oci = [
+    "oci >= 2.120",
 ]
 dev = [
     "pytest >= 8.0",

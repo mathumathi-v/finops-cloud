@@ -57,7 +57,8 @@ your billing data on their servers. finops-agent is different:
 |-------|--------|-----------|-------------------|
 | AWS | **Supported** | Cost Explorer API (daily, per service/region) | EC2, EBS, RDS, ELB/ALB, NAT Gateway, EKS |
 | GCP | **Supported** | BigQuery billing export (daily, per service/region) | Compute Engine VMs, Persistent Disks, Load Balancers, GKE |
-| Azure | Coming soon | Cost Management API | VMs, Managed Disks, Load Balancers, AKS |
+| Azure | **Supported** | Cost Management API (daily, per service/region) | VMs, Managed Disks, Load Balancers, AKS, Storage Accounts, App Service Plans |
+| OCI | **Supported** | Usage API (daily, per service/region) | Compute, Block Volumes, Load Balancers, OKE |
 
 ---
 
@@ -66,15 +67,17 @@ your billing data on their servers. finops-agent is different:
 ### 1. Install
 
 ```bash
-git clone https://github.com/your-org/finops-agent.git
-cd finops-agent
+git clone https://github.com/mathumathi-v/finops-cloud.git
+cd finops-cloud  # or rename to finops-agent
 pip install -e .
 ```
 
-For GCP support, install the optional GCP dependencies:
+For cloud-specific dependencies:
 
 ```bash
-pip install -e ".[gcp]"
+pip install -e ".[gcp]"     # GCP support
+pip install -e ".[azure]"   # Azure support
+pip install -e ".[oci]"     # OCI support
 ```
 
 For development (linting, type checking, tests):
@@ -88,7 +91,8 @@ pip install -e ".[dev]"
 See the full setup guides below:
 - [AWS Setup](#aws-setup)
 - [GCP Setup](#gcp-setup)
-- [Azure Setup](#azure-setup-coming-soon)
+- [Azure Setup](#azure-setup)
+- [OCI Setup](#oci-setup)
 
 ### 3. Configure an LLM (optional)
 
@@ -358,10 +362,7 @@ Container API listClusters
 
 ---
 
-## Azure Setup (coming soon)
-
-Azure support is under active development. When released, it will use the
-**Azure Cost Management API** and require:
+## Azure Setup
 
 ### Required roles
 
@@ -408,6 +409,87 @@ az provider register --namespace Microsoft.Compute
 az provider register --namespace Microsoft.ContainerService
 az provider register --namespace Microsoft.CostManagement
 az provider register --namespace Microsoft.Network
+az provider register --namespace Microsoft.Storage
+az provider register --namespace Microsoft.Web
+```
+
+### How Azure data flows
+
+```
+Azure Cost Management API
+  └─ Query (ActualCost, Daily, grouped by ServiceName + ResourceLocation)
+       └─ CostSnapshot (per service/region/day)
+            └─ SQLite cost_snapshots table
+                 └─ intelligence engine (anomaly, forecast, contributors)
+
+Compute / Network / ContainerService / Storage / Web management APIs
+  └─ ResourceSnapshot (per resource, with state + metadata)
+       └─ SQLite resource_snapshots table
+            └─ intelligence engine (waste detection)
+```
+
+---
+
+## OCI Setup
+
+### Required policies
+
+The agent needs **read-only** access only. Create a policy in your OCI tenancy:
+
+```
+Allow group finops-readers to read all-resources in tenancy
+Allow group finops-readers to read usage-reports in tenancy
+```
+
+Or use a minimal set of statements:
+
+```
+Allow group finops-readers to read instances in tenancy
+Allow group finops-readers to read volumes in tenancy
+Allow group finops-readers to read volume-attachments in tenancy
+Allow group finops-readers to read load-balancers in tenancy
+Allow group finops-readers to read clusters in tenancy
+Allow group finops-readers to read node-pools in tenancy
+Allow group finops-readers to read usage-reports in tenancy
+```
+
+### Authentication methods
+
+**Option 1 — OCI CLI config (recommended for local use)**
+
+```bash
+oci setup config                  # creates ~/.oci/config
+finops config set oci.enabled true
+finops config set oci.compartment_id "ocid1.compartment.oc1..YOUR_COMPARTMENT"
+```
+
+**Option 2 — Custom config file and profile**
+
+```bash
+finops config set oci.enabled true
+finops config set oci.compartment_id "ocid1.compartment.oc1..YOUR_COMPARTMENT"
+finops config set oci.config_file "/path/to/oci/config"
+finops config set oci.profile "PROD"
+```
+
+**Option 3 — Instance principal (for OCI compute instances)**
+
+When running on an OCI instance with instance principal configured, the SDK
+picks up credentials automatically from the instance metadata service.
+
+### How OCI data flows
+
+```
+OCI Usage API (UsageapiClient)
+  └─ RequestSummarizedUsages (DAILY, COST, grouped by service + region)
+       └─ CostSnapshot (per service/region/day)
+            └─ SQLite cost_snapshots table
+                 └─ intelligence engine (anomaly, forecast, contributors)
+
+Core / BlockStorage / LoadBalancer / ContainerEngine APIs
+  └─ ResourceSnapshot (per resource, with state + metadata)
+       └─ SQLite resource_snapshots table
+            └─ intelligence engine (waste detection)
 ```
 
 ---
@@ -494,7 +576,7 @@ finops config set llm.api_key ollama
 ### Global flags
 
 ```bash
---provider aws|gcp|azure|all    # Filter by cloud provider (default: aws)
+--provider aws|gcp|azure|oci|all  # Filter by cloud provider (default: aws)
 --output json|table|plain       # Output format (default: table)
 --since YYYY-MM-DD              # Filter from date
 ```
@@ -563,7 +645,10 @@ finops summary --output plain     # Plain text for piping / grep
      │ AWS Res.   │  ← EC2/EBS/ELB/NAT/EKS Describe*
      │ GCP Cost   │  ← BigQuery billing export
      │ GCP Res.   │  ← Compute/Container aggregatedList
-     │ Azure*     │  ← Cost Management API (coming soon)
+     │ Azure Cost │  ← Cost Management API
+     │ Azure Res. │  ← Compute/Network/Storage/Web mgmt APIs
+     │ OCI Cost   │  ← Usage API
+     │ OCI Res.   │  ← Core/BlockStorage/LB/ContainerEngine
      └────────────┘
 ```
 
@@ -595,7 +680,14 @@ finops-agent/
 │   │   ├── collector.py        # Unified GCP collector + credential loading
 │   │   ├── cost_collector.py   # BigQuery billing export → CostSnapshot
 │   │   └── resource_collector.py  # Compute VMs, Disks, LBs, GKE
-│   └── azure/                  # Coming soon
+│   ├── azure/
+│   │   ├── collector.py        # Unified Azure collector + credential building
+│   │   ├── cost_collector.py   # Cost Management API → CostSnapshot
+│   │   └── resource_collector.py  # VMs, Managed Disks, LBs, AKS, Storage, App Service
+│   └── oci/
+│       ├── collector.py        # Unified OCI collector + config loading
+│       ├── cost_collector.py   # Usage API → CostSnapshot
+│       └── resource_collector.py  # Compute, Block Volumes, LBs, OKE
 ├── cost_model/
 │   └── models.py               # ResourceSnapshot, CostSnapshot, AnomalyEvent
 ├── intelligence/
@@ -611,10 +703,12 @@ finops-agent/
 ├── storage/
 │   ├── base.py                 # StorageAdapter abstract base class
 │   └── sqlite_adapter.py       # SQLite with schema migration
-├── tests/                      # 62 unit tests covering all modules
+├── tests/
 │   ├── conftest.py
 │   ├── test_aws_collector.py
 │   ├── test_gcp_collector.py
+│   ├── test_azure_collector.py
+│   ├── test_oci_collector.py
 │   ├── test_cost_model.py
 │   ├── test_intelligence.py
 │   ├── test_llm.py
@@ -658,6 +752,13 @@ azure:
   tenant_id: ""
   client_id: ""                 # Service principal app ID (empty = use az login)
   client_secret: ""
+
+oci:
+  enabled: false
+  compartment_id: ""            # Compartment OCID to scan for resources
+  tenancy_id: ""                # Tenancy OCID (defaults to value in OCI config)
+  config_file: ""               # Path to OCI config (empty = ~/.oci/config)
+  profile: ""                   # OCI config profile (empty = DEFAULT)
 
 llm:
   provider: local               # openai | anthropic | local (for Groq/Gemini/Ollama)
@@ -740,7 +841,8 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting and the full security
 - [x] Cost forecasting (linear regression + trend)
 - [x] LLM-powered explanations (OpenAI, Anthropic, Groq, Gemini, Ollama)
 - [x] CLI with table/JSON/plain output
-- [ ] Azure Cost Management + resource collection (VMs, Disks, AKS)
+- [x] Azure Cost Management + resource collection (VMs, Disks, LBs, AKS, Storage, App Service)
+- [x] OCI Usage API + resource collection (Compute, Block Volumes, LBs, OKE)
 - [ ] CloudWatch/Cloud Monitoring integration for CPU-based waste detection
 - [ ] Scheduler daemon mode (`finops-agent run --mode daemon`)
 - [ ] Kubernetes CronJob deployment

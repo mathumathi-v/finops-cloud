@@ -54,7 +54,7 @@ def _parse_since(since: str | None) -> date:
 
 @app.command()
 def summary(
-    provider: str = typer.Option("aws", help="Cloud provider: aws|gcp|azure|all"),
+    provider: str = typer.Option("aws", help="Cloud provider: aws|gcp|azure|oci|all"),
     output: str = typer.Option("table", help="Output format: json|table|plain"),
     since: str | None = typer.Option(None, help="Filter from date (YYYY-MM-DD)"),
 ) -> None:
@@ -349,14 +349,21 @@ def collect(
         console.print("Collecting cost data (last 30 days)...")
         start = date.today() - timedelta(days=30)
         end = date.today()
-        costs = collector.collect_costs(start, end)
-        storage.save_cost_snapshots(costs)
-        console.print(f"  Saved {len(costs)} cost snapshots.")
+        try:
+            costs = collector.collect_costs(start, end)
+            storage.save_cost_snapshots(costs)
+            console.print(f"  Saved {len(costs)} cost snapshots.")
+        except Exception as e:
+            console.print(f"[yellow]Cost collection failed: {e}[/yellow]")
+            console.print("[dim]Continuing with resource collection...[/dim]")
 
         console.print("Collecting resource data...")
-        resources = collector.collect_resources()
-        storage.save_resource_snapshots(resources)
-        console.print(f"  Saved {len(resources)} resource snapshots.")
+        try:
+            resources = collector.collect_resources()
+            storage.save_resource_snapshots(resources)
+            console.print(f"  Saved {len(resources)} resource snapshots.")
+        except Exception as e:
+            console.print(f"[red]Resource collection failed: {e}[/red]")
 
         console.print("[green]AWS collection complete.[/green]")
 
@@ -414,16 +421,62 @@ def collect(
                 console.print("Collecting Azure cost data (last 30 days)...")
                 start = date.today() - timedelta(days=30)
                 end = date.today()
-                azure_costs = azure_collector.collect_costs(start, end)
-                storage.save_cost_snapshots(azure_costs)
-                console.print(f"  Saved {len(azure_costs)} Azure cost snapshots.")
+                try:
+                    azure_costs = azure_collector.collect_costs(start, end)
+                    storage.save_cost_snapshots(azure_costs)
+                    console.print(f"  Saved {len(azure_costs)} Azure cost snapshots.")
+                except Exception as e:
+                    console.print(f"[yellow]Cost collection failed: {e}[/yellow]")
+                    console.print("[dim]Continuing with resource collection...[/dim]")
 
                 console.print("Collecting Azure resource data...")
-                azure_resources = azure_collector.collect_resources()
-                storage.save_resource_snapshots(azure_resources)
-                console.print(f"  Saved {len(azure_resources)} Azure resource snapshots.")
+                try:
+                    azure_resources = azure_collector.collect_resources()
+                    storage.save_resource_snapshots(azure_resources)
+                    console.print(f"  Saved {len(azure_resources)} Azure resource snapshots.")
+                except Exception as e:
+                    console.print(f"[red]Resource collection failed: {e}[/red]")
 
                 console.print("[green]Azure collection complete.[/green]")
+
+    if provider in ("oci", "all"):
+        oci_cfg = config.get("oci", {})
+        if not oci_cfg.get("enabled", False):
+            console.print("[yellow]OCI is not enabled in config.[/yellow]")
+        else:
+            from cloud.oci.collector import OCICollector
+
+            console.print("Connecting to OCI...")
+            oci_collector = OCICollector(
+                compartment_id=oci_cfg.get("compartment_id", ""),
+                tenancy_id=oci_cfg.get("tenancy_id") or None,
+                config_file=oci_cfg.get("config_file") or None,
+                profile=oci_cfg.get("profile") or None,
+            )
+
+            if not oci_collector.test_connection():
+                console.print("[red]OCI connection failed. Check credentials.[/red]")
+            else:
+                console.print("Collecting OCI cost data (last 30 days)...")
+                start = date.today() - timedelta(days=30)
+                end = date.today()
+                try:
+                    oci_costs = oci_collector.collect_costs(start, end)
+                    storage.save_cost_snapshots(oci_costs)
+                    console.print(f"  Saved {len(oci_costs)} OCI cost snapshots.")
+                except Exception as e:
+                    console.print(f"[yellow]Cost collection failed: {e}[/yellow]")
+                    console.print("[dim]Continuing with resource collection...[/dim]")
+
+                console.print("Collecting OCI resource data...")
+                try:
+                    oci_resources = oci_collector.collect_resources()
+                    storage.save_resource_snapshots(oci_resources)
+                    console.print(f"  Saved {len(oci_resources)} OCI resource snapshots.")
+                except Exception as e:
+                    console.print(f"[red]Resource collection failed: {e}[/red]")
+
+                console.print("[green]OCI collection complete.[/green]")
 
 
 @app.command()
