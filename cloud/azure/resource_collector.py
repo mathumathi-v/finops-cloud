@@ -11,22 +11,145 @@ logger = logging.getLogger(__name__)
 # Azure VM size → approximate hourly on-demand USD (East US, Linux).
 # Used only when billing data is not available per-resource.
 _VM_HOURLY_USD: dict[str, float] = {
+    # B-series (burstable)
     "standard_b1s": 0.0104,
     "standard_b1ms": 0.0207,
     "standard_b2s": 0.0416,
     "standard_b2ms": 0.0832,
     "standard_b4ms": 0.166,
+    "standard_b8ms": 0.333,
+    "standard_b12ms": 0.499,
+    "standard_b16ms": 0.666,
+    # D-series v3 (general purpose)
+    "standard_d2_v3": 0.096,
+    "standard_d4_v3": 0.192,
+    "standard_d8_v3": 0.384,
+    "standard_d16_v3": 0.768,
+    "standard_d32_v3": 1.536,
     "standard_d2s_v3": 0.096,
     "standard_d4s_v3": 0.192,
     "standard_d8s_v3": 0.384,
+    "standard_d16s_v3": 0.768,
+    "standard_d32s_v3": 1.536,
+    # D-series v4
     "standard_d2s_v4": 0.096,
     "standard_d4s_v4": 0.192,
+    "standard_d8s_v4": 0.384,
+    "standard_d16s_v4": 0.768,
+    "standard_d2_v4": 0.096,
+    "standard_d4_v4": 0.192,
+    "standard_d8_v4": 0.384,
+    "standard_d16_v4": 0.768,
+    # D-series v5
     "standard_d2s_v5": 0.096,
     "standard_d4s_v5": 0.192,
+    "standard_d8s_v5": 0.384,
+    "standard_d16s_v5": 0.768,
+    "standard_d2_v5": 0.096,
+    "standard_d4_v5": 0.192,
+    "standard_d8_v5": 0.384,
+    "standard_d16_v5": 0.768,
+    # Dас-series v4 (AMD)
+    "standard_d2as_v4": 0.086,
+    "standard_d4as_v4": 0.172,
+    "standard_d8as_v4": 0.344,
+    "standard_d16as_v4": 0.688,
+    "standard_d32as_v4": 1.376,
+    # E-series v3 (memory-optimised)
     "standard_e2s_v3": 0.126,
     "standard_e4s_v3": 0.252,
+    "standard_e8s_v3": 0.504,
+    "standard_e16s_v3": 1.008,
+    "standard_e32s_v3": 2.016,
+    # E-series v4
+    "standard_e2s_v4": 0.126,
+    "standard_e4s_v4": 0.252,
+    "standard_e8s_v4": 0.504,
+    "standard_e16s_v4": 1.008,
+    # E-series v5
+    "standard_e2s_v5": 0.126,
+    "standard_e4s_v5": 0.252,
+    "standard_e8s_v5": 0.504,
+    "standard_e16s_v5": 1.008,
+    # F-series v2 (compute-optimised)
     "standard_f2s_v2": 0.085,
     "standard_f4s_v2": 0.169,
+    "standard_f8s_v2": 0.338,
+    "standard_f16s_v2": 0.677,
+    "standard_f32s_v2": 1.354,
+    # F-series (original)
+    "standard_f2": 0.094,
+    "standard_f4": 0.188,
+    "standard_f8": 0.376,
+    "standard_f16": 0.751,
+    # A-series v2 (entry-level)
+    "standard_a1_v2": 0.043,
+    "standard_a2_v2": 0.085,
+    "standard_a4_v2": 0.17,
+    "standard_a8_v2": 0.34,
+    "standard_a2m_v2": 0.099,
+    "standard_a4m_v2": 0.199,
+    "standard_a8m_v2": 0.397,
+    # NC-series (GPU — NVIDIA Tesla K80 / P100 / V100)
+    "standard_nc6": 0.90,
+    "standard_nc12": 1.80,
+    "standard_nc24": 3.60,
+    "standard_nc6s_v3": 3.06,
+    "standard_nc12s_v3": 6.12,
+    "standard_nc24s_v3": 12.24,
+    "standard_nd40rs_v2": 22.032,
+    # NV-series (GPU — visualisation)
+    "standard_nv6": 1.14,
+    "standard_nv12": 2.28,
+    "standard_nv24": 4.56,
+}
+
+# Load Balancer hourly on-demand USD (East US).
+# Basic SKU is free; Standard is ~$0.025/hr base; Gateway is ~$0.014/hr base.
+_LB_HOURLY_USD: dict[str, float] = {
+    "basic": 0.0,
+    "standard": 0.025,
+    "gateway": 0.014,
+}
+
+# AKS control-plane hourly USD.
+# Free tier is $0.00; Standard and Premium tiers are $0.10/hr per cluster.
+_AKS_CONTROL_PLANE_HOURLY_USD: dict[str, float] = {
+    "free": 0.0,
+    "standard": 0.10,
+    "premium": 0.10,
+}
+
+# App Service Plan SKU → approximate daily USD (East US, Linux).
+# Based on the cheapest SKU within each tier.
+_APP_SERVICE_PLAN_DAILY_USD: dict[str, float] = {
+    # Free / Shared
+    "f1": 0.0,
+    "d1": 0.316,
+    # Basic
+    "b1": 0.432,
+    "b2": 0.864,
+    "b3": 1.728,
+    # Standard
+    "s1": 2.40,
+    "s2": 4.80,
+    "s3": 9.60,
+    # Premium v2
+    "p1v2": 2.40,
+    "p2v2": 4.80,
+    "p3v2": 9.60,
+    # Premium v3
+    "p1v3": 4.056,
+    "p2v3": 8.112,
+    "p3v3": 16.176,
+    # Isolated v1
+    "i1": 24.0,
+    "i2": 48.0,
+    "i3": 96.0,
+    # Isolated v2
+    "i1v2": 24.0,
+    "i2v2": 48.0,
+    "i3v2": 96.0,
 }
 
 # Managed disk price per GB per month (LRS, East US)
@@ -56,6 +179,23 @@ def _daily_cost_for_disk(sku: str, size_gb: int) -> float:
     sku_key = sku.lower().replace(" ", "_").replace("-", "_")
     monthly_per_gb = _DISK_PRICE_PER_GB_MONTH.get(sku_key, 0.04)
     return round(size_gb * monthly_per_gb / _DAYS_PER_MONTH, 6)
+
+
+def _daily_cost_for_lb(sku: str) -> float:
+    """Estimate daily base cost for a load balancer from its SKU."""
+    hourly = _LB_HOURLY_USD.get(sku.lower(), 0.0)
+    return round(hourly * _HOURS_PER_DAY, 4)
+
+
+def _daily_cost_for_aks_control_plane(tier: str) -> float:
+    """Estimate daily control-plane cost for an AKS cluster tier."""
+    hourly = _AKS_CONTROL_PLANE_HOURLY_USD.get(tier.lower(), 0.0)
+    return round(hourly * _HOURS_PER_DAY, 4)
+
+
+def _daily_cost_for_app_service_plan(sku_name: str) -> float:
+    """Estimate daily cost for an App Service Plan SKU."""
+    return _APP_SERVICE_PLAN_DAILY_USD.get(sku_name.lower(), 0.0)
 
 
 def _parse_resource_group(resource_id: str) -> str:
@@ -90,6 +230,8 @@ class AzureResourceCollector:
             ("Managed Disks", self._collect_disks),
             ("Load Balancers", self._collect_load_balancers),
             ("AKS clusters", self._collect_aks),
+            ("Storage Accounts", self._collect_storage_accounts),
+            ("App Service Plans", self._collect_app_service_plans),
         ]
         for name, fn in collectors:
             try:
@@ -265,6 +407,7 @@ class AzureResourceCollector:
             rg = _parse_resource_group(lb.id or "")
 
             frontend_count = len(lb.frontend_ip_configurations or [])
+            daily = _daily_cost_for_lb(sku_name)
 
             snapshots.append(
                 ResourceSnapshot(
@@ -275,8 +418,8 @@ class AzureResourceCollector:
                     service="LoadBalancer",
                     name=lb.name or "",
                     region=location,
-                    daily_cost=0.0,
-                    monthly_cost_estimate=0.0,
+                    daily_cost=daily,
+                    monthly_cost_estimate=round(daily * _DAYS_PER_MONTH, 4),
                     currency="USD",
                     state="active",
                     tags=tags,
@@ -316,6 +459,12 @@ class AzureResourceCollector:
             rg = _parse_resource_group(cluster.id or "")
             state = (cluster.provisioning_state or "unknown").lower()
 
+            # Determine control-plane tier: cluster.sku.tier is "Free", "Standard", or "Premium"
+            sku_tier = ""
+            if cluster.sku and cluster.sku.tier:
+                sku_tier = str(cluster.sku.tier)
+            cp_daily = _daily_cost_for_aks_control_plane(sku_tier)
+
             snapshots.append(
                 ResourceSnapshot(
                     resource_id=cluster.id or cluster.name or "",
@@ -325,8 +474,8 @@ class AzureResourceCollector:
                     service="AKS",
                     name=cluster.name or "",
                     region=location,
-                    daily_cost=0.0,
-                    monthly_cost_estimate=0.0,
+                    daily_cost=cp_daily,
+                    monthly_cost_estimate=round(cp_daily * _DAYS_PER_MONTH, 4),
                     currency="USD",
                     state=state,
                     tags=tags,
@@ -335,6 +484,7 @@ class AzureResourceCollector:
                         "resource_group": rg,
                         "node_resource_group": cluster.node_resource_group or "",
                         "dns_prefix": cluster.dns_prefix or "",
+                        "sku_tier": sku_tier,
                     },
                     snapshot_time=self._snapshot_time,
                 )
@@ -373,5 +523,115 @@ class AzureResourceCollector:
                         snapshot_time=self._snapshot_time,
                     )
                 )
+
+        return snapshots
+
+    # ------------------------------------------------------------------
+    # Storage Accounts
+    # ------------------------------------------------------------------
+
+    def _collect_storage_accounts(self) -> list[ResourceSnapshot]:
+        """List all Storage Accounts in the subscription.
+
+        Storage costs depend on data volume which is unavailable without
+        monitoring APIs, so daily_cost is set to 0.0. The inventory is
+        still useful for waste-detection (unused accounts) and auditing.
+        """
+        try:
+            from azure.mgmt.storage import StorageManagementClient  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise ImportError(
+                "azure-mgmt-storage is required. "
+                "Install it with: pip install azure-mgmt-storage"
+            ) from exc
+
+        client = StorageManagementClient(self._credential, self._subscription_id)  # type: ignore[arg-type]
+        snapshots: list[ResourceSnapshot] = []
+
+        for account in client.storage_accounts.list():
+            location = account.location or "unknown"
+            sku_name = account.sku.name if account.sku else "Unknown"
+            kind = str(account.kind or "Unknown")
+            tags: dict[str, str] = dict(account.tags or {})
+            rg = _parse_resource_group(account.id or "")
+
+            snapshots.append(
+                ResourceSnapshot(
+                    resource_id=account.id or account.name or "",
+                    provider="azure",
+                    account_id=self._subscription_id,
+                    type="storage",
+                    service="StorageAccount",
+                    name=account.name or "",
+                    region=location,
+                    daily_cost=0.0,
+                    monthly_cost_estimate=0.0,
+                    currency="USD",
+                    state="active",
+                    tags=tags,
+                    metadata={
+                        "sku": sku_name,
+                        "kind": kind,
+                        "resource_group": rg,
+                        "access_tier": str(account.access_tier or ""),
+                        "https_only": bool(account.enable_https_traffic_only),
+                    },
+                    snapshot_time=self._snapshot_time,
+                )
+            )
+
+        return snapshots
+
+    # ------------------------------------------------------------------
+    # App Service Plans
+    # ------------------------------------------------------------------
+
+    def _collect_app_service_plans(self) -> list[ResourceSnapshot]:
+        """List all App Service Plans in the subscription."""
+        try:
+            from azure.mgmt.web import WebSiteManagementClient  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise ImportError(
+                "azure-mgmt-web is required. "
+                "Install it with: pip install azure-mgmt-web"
+            ) from exc
+
+        client = WebSiteManagementClient(self._credential, self._subscription_id)  # type: ignore[arg-type]
+        snapshots: list[ResourceSnapshot] = []
+
+        for plan in client.app_service_plans.list():
+            location = plan.location or "unknown"
+            sku_name = plan.sku.name if plan.sku else ""
+            sku_tier = plan.sku.tier if plan.sku else ""
+            tags: dict[str, str] = dict(plan.tags or {})
+            rg = _parse_resource_group(plan.id or "")
+            worker_count = plan.number_of_sites or 0
+
+            daily = _daily_cost_for_app_service_plan(sku_name)
+
+            snapshots.append(
+                ResourceSnapshot(
+                    resource_id=plan.id or plan.name or "",
+                    provider="azure",
+                    account_id=self._subscription_id,
+                    type="compute",
+                    service="AppServicePlan",
+                    name=plan.name or "",
+                    region=location,
+                    daily_cost=daily,
+                    monthly_cost_estimate=round(daily * _DAYS_PER_MONTH, 4),
+                    currency="USD",
+                    state="active",
+                    tags=tags,
+                    metadata={
+                        "sku_name": sku_name,
+                        "sku_tier": sku_tier,
+                        "resource_group": rg,
+                        "worker_count": worker_count,
+                        "kind": str(plan.kind or ""),
+                    },
+                    snapshot_time=self._snapshot_time,
+                )
+            )
 
         return snapshots

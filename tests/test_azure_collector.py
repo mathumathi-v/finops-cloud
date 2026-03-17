@@ -77,6 +77,58 @@ class TestAzureResourceHelpers:
         cost = _daily_cost_for_disk("Standard_LRS", 100)
         assert cost == pytest.approx(100 * 0.04 / 30, rel=1e-4)
 
+    def test_daily_cost_for_lb_standard(self) -> None:
+        from cloud.azure.resource_collector import _daily_cost_for_lb
+
+        assert _daily_cost_for_lb("Standard") == pytest.approx(0.025 * 24, rel=1e-4)
+
+    def test_daily_cost_for_lb_basic_free(self) -> None:
+        from cloud.azure.resource_collector import _daily_cost_for_lb
+
+        assert _daily_cost_for_lb("Basic") == 0.0
+
+    def test_daily_cost_for_lb_gateway(self) -> None:
+        from cloud.azure.resource_collector import _daily_cost_for_lb
+
+        assert _daily_cost_for_lb("Gateway") == pytest.approx(0.014 * 24, rel=1e-4)
+
+    def test_daily_cost_aks_standard_tier(self) -> None:
+        from cloud.azure.resource_collector import _daily_cost_for_aks_control_plane
+
+        assert _daily_cost_for_aks_control_plane("Standard") == pytest.approx(0.10 * 24, rel=1e-4)
+
+    def test_daily_cost_aks_free_tier(self) -> None:
+        from cloud.azure.resource_collector import _daily_cost_for_aks_control_plane
+
+        assert _daily_cost_for_aks_control_plane("Free") == 0.0
+
+    def test_daily_cost_app_service_plan_s1(self) -> None:
+        from cloud.azure.resource_collector import _daily_cost_for_app_service_plan
+
+        assert _daily_cost_for_app_service_plan("S1") == pytest.approx(2.40)
+
+    def test_daily_cost_app_service_plan_f1_free(self) -> None:
+        from cloud.azure.resource_collector import _daily_cost_for_app_service_plan
+
+        assert _daily_cost_for_app_service_plan("F1") == 0.0
+
+    def test_daily_cost_app_service_plan_unknown(self) -> None:
+        from cloud.azure.resource_collector import _daily_cost_for_app_service_plan
+
+        assert _daily_cost_for_app_service_plan("X99") == 0.0
+
+    def test_expanded_vm_sizes(self) -> None:
+        from cloud.azure.resource_collector import _daily_cost_for_vm
+
+        # D-series v3 (no 's')
+        assert _daily_cost_for_vm("Standard_D2_v3", "running") == pytest.approx(0.096 * 24, rel=1e-4)
+        # E-series memory-optimised
+        assert _daily_cost_for_vm("Standard_E8s_v3", "running") == pytest.approx(0.504 * 24, rel=1e-4)
+        # GPU NC-series
+        assert _daily_cost_for_vm("Standard_NC6", "running") == pytest.approx(0.90 * 24, rel=1e-4)
+        # A-series
+        assert _daily_cost_for_vm("Standard_A2_v2", "running") == pytest.approx(0.085 * 24, rel=1e-4)
+
 
 # ---------------------------------------------------------------------------
 # AzureCostCollector
@@ -321,7 +373,7 @@ class TestAzureResourceCollectorDisks:
 
 
 class TestAzureResourceCollectorLBs:
-    def test_collect_load_balancers(self) -> None:
+    def test_collect_load_balancers_standard(self) -> None:
         collector = _make_collector()
 
         mock_lb = MagicMock()
@@ -344,6 +396,210 @@ class TestAzureResourceCollectorLBs:
         assert s.type == "network"
         assert s.region == "westeurope"
         assert s.metadata["frontend_count"] == 2
+        # Standard LB should have non-zero daily cost
+        assert s.daily_cost == pytest.approx(0.025 * 24, rel=1e-4)
+        assert s.monthly_cost_estimate == pytest.approx(0.025 * 24 * 30, rel=1e-4)
+
+    def test_collect_load_balancers_basic_free(self) -> None:
+        collector = _make_collector()
+
+        mock_lb = MagicMock()
+        mock_lb.name = "basic-lb"
+        mock_lb.id = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Network/loadBalancers/basic-lb"
+        mock_lb.location = "eastus"
+        mock_lb.sku.name = "Basic"
+        mock_lb.tags = {}
+        mock_lb.frontend_ip_configurations = [MagicMock()]
+
+        mock_client = MagicMock()
+        mock_client.load_balancers.list_all.return_value = [mock_lb]
+
+        with patch("azure.mgmt.network.NetworkManagementClient", return_value=mock_client):
+            snapshots = collector._collect_load_balancers()
+
+        assert snapshots[0].daily_cost == 0.0
+
+    def test_collect_load_balancers_gateway(self) -> None:
+        collector = _make_collector()
+
+        mock_lb = MagicMock()
+        mock_lb.name = "gw-lb"
+        mock_lb.id = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Network/loadBalancers/gw-lb"
+        mock_lb.location = "eastus"
+        mock_lb.sku.name = "Gateway"
+        mock_lb.tags = {}
+        mock_lb.frontend_ip_configurations = []
+
+        mock_client = MagicMock()
+        mock_client.load_balancers.list_all.return_value = [mock_lb]
+
+        with patch("azure.mgmt.network.NetworkManagementClient", return_value=mock_client):
+            snapshots = collector._collect_load_balancers()
+
+        assert snapshots[0].daily_cost == pytest.approx(0.014 * 24, rel=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# AzureResourceCollector — AKS
+# ---------------------------------------------------------------------------
+
+
+class TestAzureResourceCollectorAKS:
+    def test_aks_standard_tier_has_control_plane_cost(self) -> None:
+        collector = _make_collector()
+
+        mock_cluster = MagicMock()
+        mock_cluster.name = "my-cluster"
+        mock_cluster.id = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/my-cluster"
+        mock_cluster.location = "eastus"
+        mock_cluster.tags = {}
+        mock_cluster.provisioning_state = "Succeeded"
+        mock_cluster.kubernetes_version = "1.29.0"
+        mock_cluster.node_resource_group = "MC_rg_my-cluster_eastus"
+        mock_cluster.dns_prefix = "my-cluster"
+        mock_cluster.sku = MagicMock()
+        mock_cluster.sku.tier = "Standard"
+        mock_cluster.agent_pool_profiles = []
+
+        mock_client = MagicMock()
+        mock_client.managed_clusters.list.return_value = [mock_cluster]
+
+        with patch("azure.mgmt.containerservice.ContainerServiceClient", return_value=mock_client):
+            snapshots = collector._collect_aks()
+
+        assert len(snapshots) == 1
+        assert snapshots[0].daily_cost == pytest.approx(0.10 * 24, rel=1e-4)
+        assert snapshots[0].metadata["sku_tier"] == "Standard"
+
+    def test_aks_free_tier_zero_control_plane_cost(self) -> None:
+        collector = _make_collector()
+
+        mock_cluster = MagicMock()
+        mock_cluster.name = "free-cluster"
+        mock_cluster.id = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/free-cluster"
+        mock_cluster.location = "eastus"
+        mock_cluster.tags = {}
+        mock_cluster.provisioning_state = "Succeeded"
+        mock_cluster.kubernetes_version = "1.29.0"
+        mock_cluster.node_resource_group = ""
+        mock_cluster.dns_prefix = "free-cluster"
+        mock_cluster.sku = MagicMock()
+        mock_cluster.sku.tier = "Free"
+        mock_cluster.agent_pool_profiles = []
+
+        mock_client = MagicMock()
+        mock_client.managed_clusters.list.return_value = [mock_cluster]
+
+        with patch("azure.mgmt.containerservice.ContainerServiceClient", return_value=mock_client):
+            snapshots = collector._collect_aks()
+
+        assert snapshots[0].daily_cost == 0.0
+
+
+# ---------------------------------------------------------------------------
+# AzureResourceCollector — Storage Accounts
+# ---------------------------------------------------------------------------
+
+
+class TestAzureResourceCollectorStorageAccounts:
+    def test_collect_storage_accounts(self) -> None:
+        collector = _make_collector()
+
+        mock_account = MagicMock()
+        mock_account.name = "mystorageacct"
+        mock_account.id = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/mystorageacct"
+        mock_account.location = "eastus"
+        mock_account.sku = MagicMock()
+        mock_account.sku.name = "Standard_LRS"
+        mock_account.kind = "StorageV2"
+        mock_account.tags = {"env": "prod"}
+        mock_account.access_tier = "Hot"
+        mock_account.enable_https_traffic_only = True
+
+        mock_storage_client = MagicMock()
+        mock_storage_client.storage_accounts.list.return_value = [mock_account]
+
+        mock_storage_module = MagicMock()
+        mock_storage_module.StorageManagementClient.return_value = mock_storage_client
+
+        with patch.dict("sys.modules", {"azure.mgmt.storage": mock_storage_module}):
+            snapshots = collector._collect_storage_accounts()
+
+        assert len(snapshots) == 1
+        s = snapshots[0]
+        assert s.service == "StorageAccount"
+        assert s.type == "storage"
+        assert s.provider == "azure"
+        # Cost is 0.0 (data-dependent, unknown without monitoring)
+        assert s.daily_cost == 0.0
+        assert s.metadata["sku"] == "Standard_LRS"
+        assert s.metadata["kind"] == "StorageV2"
+        assert s.metadata["access_tier"] == "Hot"
+        assert s.metadata["https_only"] is True
+        assert s.tags == {"env": "prod"}
+
+
+# ---------------------------------------------------------------------------
+# AzureResourceCollector — App Service Plans
+# ---------------------------------------------------------------------------
+
+
+class TestAzureResourceCollectorAppServicePlans:
+    def _make_mock_web_module(self, plan_mock: MagicMock) -> tuple[MagicMock, MagicMock]:
+        mock_web_client = MagicMock()
+        mock_web_client.app_service_plans.list.return_value = [plan_mock]
+        mock_web_module = MagicMock()
+        mock_web_module.WebSiteManagementClient.return_value = mock_web_client
+        return mock_web_module, mock_web_client
+
+    def test_collect_app_service_plans_standard_tier(self) -> None:
+        collector = _make_collector()
+
+        mock_plan = MagicMock()
+        mock_plan.name = "my-asp"
+        mock_plan.id = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Web/serverfarms/my-asp"
+        mock_plan.location = "eastus"
+        mock_plan.sku = MagicMock()
+        mock_plan.sku.name = "S1"
+        mock_plan.sku.tier = "Standard"
+        mock_plan.tags = {}
+        mock_plan.number_of_sites = 3
+        mock_plan.kind = "linux"
+
+        mock_web_module, _ = self._make_mock_web_module(mock_plan)
+
+        with patch.dict("sys.modules", {"azure.mgmt.web": mock_web_module}):
+            snapshots = collector._collect_app_service_plans()
+
+        assert len(snapshots) == 1
+        s = snapshots[0]
+        assert s.service == "AppServicePlan"
+        assert s.type == "compute"
+        assert s.daily_cost == pytest.approx(2.40)
+        assert s.monthly_cost_estimate == pytest.approx(2.40 * 30, rel=1e-4)
+        assert s.metadata["worker_count"] == 3
+        assert s.metadata["sku_tier"] == "Standard"
+
+    def test_collect_app_service_plans_free_tier(self) -> None:
+        collector = _make_collector()
+
+        mock_plan = MagicMock()
+        mock_plan.name = "free-asp"
+        mock_plan.id = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Web/serverfarms/free-asp"
+        mock_plan.location = "eastus"
+        mock_plan.sku = MagicMock()
+        mock_plan.sku.name = "F1"
+        mock_plan.sku.tier = "Free"
+        mock_plan.tags = {}
+        mock_plan.number_of_sites = 1
+        mock_plan.kind = "app"
+
+        mock_web_module, _ = self._make_mock_web_module(mock_plan)
+
+        with patch.dict("sys.modules", {"azure.mgmt.web": mock_web_module}):
+            snapshots = collector._collect_app_service_plans()
+
+        assert snapshots[0].daily_cost == 0.0
 
 
 # ---------------------------------------------------------------------------
