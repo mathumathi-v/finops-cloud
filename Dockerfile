@@ -51,17 +51,19 @@ COPY intelligence/ intelligence/
 COPY llm/ llm/
 COPY storage/ storage/
 COPY scheduler/ scheduler/
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 RUN pip install --no-cache-dir -e ".[gcp,azure,oci]"
 
 # Data directory for SQLite DB and config
 RUN mkdir -p /home/finops/.finops-agent && \
-    chown -R finops:finops /home/finops/.finops-agent /app
+    chown -R finops:finops /home/finops/.finops-agent /app && \
+    chmod +x /usr/local/bin/docker-entrypoint.sh
 
 USER finops
 
 # Persist the database across container restarts
 VOLUME ["/home/finops/.finops-agent"]
 
-ENTRYPOINT ["finops"]
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["--help"]
