@@ -27,8 +27,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _get_storage(config: dict[str, Any]) -> SQLiteAdapter:
+    import os
     from storage.sqlite_adapter import SQLiteAdapter as _SQLiteAdapter
-    return _SQLiteAdapter(config.get("storage", {}).get("path", "~/.finops-agent/finops.db"))
+    db_path = os.environ.get("FINOPS_DB_PATH") or config.get("storage", {}).get("path", "~/.finops-agent/finops.db")
+    return _SQLiteAdapter(db_path)
 
 
 def _get_llm_client(config: dict[str, Any]) -> LLMClient:

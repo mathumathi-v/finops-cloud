@@ -61,8 +61,25 @@ class SQLiteAdapter(StorageAdapter):
 
     def __init__(self, db_path: str) -> None:
         path = Path(db_path).expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(path))
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            raise SystemExit(
+                f"Error: Cannot create data directory '{path.parent}'. "
+                "Permission denied.\n"
+                "Hint: If running in Docker, ensure the volume is writable:\n"
+                "  docker run --rm -v ~/.finops-agent:/home/finops/.finops-agent ..."
+            )
+        try:
+            self._conn = sqlite3.connect(str(path))
+        except sqlite3.OperationalError:
+            raise SystemExit(
+                f"Error: Cannot open database at '{path}'. "
+                "Permission denied.\n"
+                "Hint: If running in Docker, create the directory first:\n"
+                "  mkdir -p ~/.finops-agent && docker run --rm "
+                "-v ~/.finops-agent:/home/finops/.finops-agent ..."
+            )
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
 
