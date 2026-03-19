@@ -1,0 +1,35 @@
+# Version control
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+dist/
+build/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Environment
+.env
+*.env
+venv/
+.venv/
+
+# Data (user should mount, not bake in)
+*.db
+*.sqlite
+
+# Docs
+*.md
+!README.md
+LICENSE
+CODE_OF_CONDUCT.md
+SECURITY.md
