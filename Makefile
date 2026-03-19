@@ -32,5 +32,7 @@ docker-build:
 docker-run:
 	docker run --rm -v ~/.finops-agent:/home/finops/.finops-agent \
 		-v ~/.aws:/home/finops/.aws:ro \
+		-v ~/.config/gcloud:/home/finops/.config/gcloud:ro \
+		-v ~/.azure:/home/finops/.azure:ro \
 		-v ~/.oci:/home/finops/.oci:ro \
 		finops-agent:latest $(CMD)
