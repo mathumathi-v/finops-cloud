@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-03-20
+
+### Added
+- Dockerfile with multi-stage build (Python 3.12-slim, all cloud SDKs included)
+- `.dockerignore` for optimized build context
+- Docker Hub image: `mathumathi247/finops-agent:latest`
+- `docker-build` and `docker-run` Makefile targets
+- Docker usage instructions in README for all cloud providers (AWS, GCP, Azure, OCI)
+
+### Removed
+- `blog/` directory
+
+## [0.2.0] - 2026-03-18
+
+### Added
+- Azure Cost Management collector (daily cost per service/region)
+- Azure resource collector: VMs, Managed Disks, Load Balancers, AKS, Storage Accounts, App Service Plans
+- OCI Usage API collector (daily cost per service/region)
+- OCI resource collector: Compute instances, Block Volumes, Load Balancers, OKE clusters
+
 ## [0.1.0] - 2026-03-16
 
 ### Added

@@ -86,6 +86,48 @@ For development (linting, type checking, tests):
 pip install -e ".[dev]"
 ```
 
+### Alternative: Docker
+
+```bash
+# Pull from Docker Hub
+docker pull mathumathi247/finops-agent:latest
+
+# Run any command — mount your cloud credentials read-only
+docker run --rm \
+  -v ~/.finops-agent:/home/finops/.finops-agent \
+  -v ~/.aws:/home/finops/.aws:ro \
+  mathumathi247/finops-agent:latest summary --provider aws
+
+# GCP credentials
+docker run --rm \
+  -v ~/.finops-agent:/home/finops/.finops-agent \
+  -v ~/.config/gcloud:/home/finops/.config/gcloud:ro \
+  mathumathi247/finops-agent:latest collect --provider gcp
+
+# Azure credentials
+docker run --rm \
+  -v ~/.finops-agent:/home/finops/.finops-agent \
+  -v ~/.azure:/home/finops/.azure:ro \
+  mathumathi247/finops-agent:latest summary --provider azure
+
+# OCI credentials
+docker run --rm \
+  -v ~/.finops-agent:/home/finops/.finops-agent \
+  -v ~/.oci:/home/finops/.oci:ro \
+  mathumathi247/finops-agent:latest collect --provider oci
+```
+
+Or build locally:
+
+```bash
+docker build -t finops-agent:latest .
+make docker-build
+make docker-run CMD="collect --provider aws"
+```
+
+The image includes all cloud provider SDKs (AWS, GCP, Azure, OCI), runs as
+non-root user, and persists data via the `~/.finops-agent` volume mount.
+
 ### 2. Configure your cloud
 
 See the full setup guides below:
@@ -843,6 +885,7 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting and the full security
 - [x] CLI with table/JSON/plain output
 - [x] Azure Cost Management + resource collection (VMs, Disks, LBs, AKS, Storage, App Service)
 - [x] OCI Usage API + resource collection (Compute, Block Volumes, LBs, OKE)
+- [x] Docker image with multi-stage build (all cloud providers included)
 - [ ] CloudWatch/Cloud Monitoring integration for CPU-based waste detection
 - [ ] Scheduler daemon mode (`finops-agent run --mode daemon`)
 - [ ] Kubernetes CronJob deployment
