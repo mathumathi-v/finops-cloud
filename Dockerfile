@@ -31,15 +31,23 @@ LABEL org.opencontainers.image.title="finops-agent" \
       org.opencontainers.image.source="https://github.com/mathumathi-v/finops-cloud" \
       org.opencontainers.image.licenses="Apache-2.0"
 
+# Upgrade OS packages to patch known CVEs, clean up apt cache
+RUN apt-get update && \
+    apt-get upgrade -y && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
 # Non-root user for security
 RUN groupadd --gid 1000 finops && \
     useradd --uid 1000 --gid finops --create-home finops
 
 WORKDIR /app
 
-# Install from pre-built wheels
+# Install from pre-built wheels, upgrade pip to latest
 COPY --from=builder /wheels /wheels
-RUN pip install --no-cache-dir /wheels/*.whl && rm -rf /wheels
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir /wheels/*.whl && \
+    rm -rf /wheels
 
 # Copy source and install in editable mode (for the entrypoint)
 COPY pyproject.toml README.md ./
