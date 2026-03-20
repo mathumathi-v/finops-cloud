@@ -61,7 +61,8 @@ COPY storage/ storage/
 COPY scheduler/ scheduler/
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-RUN pip install --no-cache-dir -e ".[gcp,azure,oci]"
+RUN pip install --no-cache-dir -e ".[gcp,azure,oci]" && \
+    pip install --no-cache-dir "pyOpenSSL>=26.0.0"
 
 # Data directory for SQLite DB and config
 RUN mkdir -p /home/finops/.finops-agent && \
