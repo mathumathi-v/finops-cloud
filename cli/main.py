@@ -536,7 +536,17 @@ def config(
             if p not in target or not isinstance(target[p], dict):
                 target[p] = {}
             target = target[p]
-        target[parts[-1]] = value
+        # Parse JSON/YAML values so lists and booleans are stored correctly.
+        # e.g. '["us-east-1"]' → list, 'true' → bool, '42' → int
+        parsed_value: Any = value
+        try:
+            parsed_value = _yaml.safe_load(value)
+        except Exception:
+            pass
+        # If parsing returned None for a non-empty string, keep the string
+        if parsed_value is None and value:
+            parsed_value = value
+        target[parts[-1]] = parsed_value
 
         with open(config_path, "w") as f:
             _yaml.dump(set_cfg, f, default_flow_style=False)

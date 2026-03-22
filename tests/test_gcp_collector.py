@@ -11,6 +11,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+pytest.importorskip("google.cloud.bigquery", reason="google-cloud-bigquery not installed")
+
 from cost_model.models import CostSnapshot
 
 # ---------------------------------------------------------------------------
