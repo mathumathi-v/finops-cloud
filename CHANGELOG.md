@@ -7,12 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.3.1] - 2026-03-22
+## [0.3.2] - 2026-03-22
 
 ### Added
 - Amazon Bedrock LLM provider — supports Nova, Titan, Claude, Llama, Mistral via Converse API
 - Bedrock uses IAM credentials (no separate API key required)
 - `llm.bedrock_region` config option (defaults to `us-east-1`)
+- 7 unit tests for Bedrock provider (converse API, edge cases, region config)
 - Updated README with Bedrock setup guide, architecture diagram, and config reference
 
 ## [0.3.0] - 2026-03-20
