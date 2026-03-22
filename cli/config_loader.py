@@ -109,6 +109,7 @@ def _default_config() -> dict[str, Any]:
             "api_key": "",
             "model": "gpt-4o",
             "base_url": "",
+            "bedrock_region": "us-east-1",
         },
         "storage": {"path": "~/.finops-agent/finops.db"},
         "scheduler": {"enabled": False, "interval_hours": 24},
