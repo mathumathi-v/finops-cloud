@@ -1,6 +1,9 @@
 # Copyright 2025 finops-agent contributors
 # SPDX-License-Identifier: Apache-2.0
 
+from unittest.mock import MagicMock, patch
+
+from llm.client import LLMClient, LLMProvider
 from llm.prompt_builder import build_bill_prompt, build_explain_prompt, build_spike_prompt
 from llm.sanitizer import redact_sensitive_data, sanitize_cloud_string
 
@@ -72,3 +75,91 @@ class TestPromptBuilder:
         _, user = build_explain_prompt(context)
         assert "ignore previous" not in user
         assert "123456789012" not in user
+
+
+class TestLLMClientBedrock:
+    def test_bedrock_provider_enum(self) -> None:
+        assert LLMProvider.BEDROCK.value == "bedrock"
+
+    def test_bedrock_client_init(self) -> None:
+        client = LLMClient(
+            provider="bedrock",
+            api_key="",
+            model="amazon.nova-pro-v1:0",
+            bedrock_region="us-west-2",
+        )
+        assert client._provider == LLMProvider.BEDROCK
+        assert client._model == "amazon.nova-pro-v1:0"
+        assert client._bedrock_region == "us-west-2"
+        assert client._api_key == ""
+
+    def test_bedrock_default_region(self) -> None:
+        client = LLMClient(provider="bedrock", api_key="", model="amazon.nova-pro-v1:0")
+        assert client._bedrock_region == "us-east-1"
+
+    @patch("boto3.client")
+    def test_bedrock_explain_calls_converse(self, mock_client_fn: MagicMock) -> None:
+        mock_bedrock = MagicMock()
+        mock_client_fn.return_value = mock_bedrock
+        mock_bedrock.converse.return_value = {
+            "output": {
+                "message": {
+                    "content": [{"text": "Your costs spiked due to GPU instances."}],
+                },
+            },
+        }
+
+        client = LLMClient(
+            provider="bedrock",
+            api_key="",
+            model="amazon.nova-pro-v1:0",
+            bedrock_region="us-east-1",
+        )
+        result = client.explain("You are a FinOps analyst.", "Explain this spike.")
+
+        mock_client_fn.assert_called_once_with("bedrock-runtime", region_name="us-east-1")
+        mock_bedrock.converse.assert_called_once()
+        call_kwargs = mock_bedrock.converse.call_args[1]
+        assert call_kwargs["modelId"] == "amazon.nova-pro-v1:0"
+        assert call_kwargs["system"] == [{"text": "You are a FinOps analyst."}]
+        assert call_kwargs["messages"] == [
+            {"role": "user", "content": [{"text": "Explain this spike."}]},
+        ]
+        assert call_kwargs["inferenceConfig"]["temperature"] == 0.3
+        assert call_kwargs["inferenceConfig"]["maxTokens"] == 2000
+        assert result == "Your costs spiked due to GPU instances."
+
+    @patch("boto3.client")
+    def test_bedrock_empty_response(self, mock_client_fn: MagicMock) -> None:
+        mock_bedrock = MagicMock()
+        mock_client_fn.return_value = mock_bedrock
+        mock_bedrock.converse.return_value = {"output": {"message": {"content": []}}}
+
+        client = LLMClient(provider="bedrock", api_key="", model="amazon.nova-pro-v1:0")
+        result = client.explain("system", "user")
+        assert result == ""
+
+    @patch("boto3.client")
+    def test_bedrock_missing_output_keys(self, mock_client_fn: MagicMock) -> None:
+        mock_bedrock = MagicMock()
+        mock_client_fn.return_value = mock_bedrock
+        mock_bedrock.converse.return_value = {}
+
+        client = LLMClient(provider="bedrock", api_key="", model="amazon.nova-pro-v1:0")
+        result = client.explain("system", "user")
+        assert result == ""
+
+    @patch("boto3.client")
+    def test_bedrock_respects_region_config(self, mock_client_fn: MagicMock) -> None:
+        mock_bedrock = MagicMock()
+        mock_client_fn.return_value = mock_bedrock
+        mock_bedrock.converse.return_value = {
+            "output": {"message": {"content": [{"text": "ok"}]}},
+        }
+
+        client = LLMClient(
+            provider="bedrock", api_key="", model="meta.llama3-70b-instruct-v1:0",
+            bedrock_region="eu-west-1",
+        )
+        client.explain("sys", "usr")
+        mock_client_fn.assert_called_once_with("bedrock-runtime", region_name="eu-west-1")

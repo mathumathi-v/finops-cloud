@@ -46,7 +46,7 @@ your billing data on their servers. finops-agent is different:
 - **Local-only data** — cost data stays in a local SQLite database, never leaves your machine
 - **Real reasoning** — deterministic anomaly/waste detection first, LLM for explanation only
 - **Read-only** — needs only viewer/read permissions, will never touch your infrastructure
-- **BYO LLM** — works with OpenAI, Anthropic, Groq, Gemini, Ollama, or any OpenAI-compatible endpoint
+- **BYO LLM** — works with OpenAI, Anthropic, Amazon Bedrock, Groq, Gemini, Ollama, or any OpenAI-compatible endpoint
 - **Zero telemetry** — no tracking, no analytics, no phone-home
 
 ---
@@ -581,7 +581,26 @@ finops config set llm.model claude-sonnet-4-6
 finops config set llm.api_key sk-ant-your_key_here
 ```
 
-### Option 5 — Ollama (fully local, free)
+### Option 5 — Amazon Bedrock (uses IAM credentials, no API key needed)
+
+If you're already on AWS, Bedrock lets you use Nova, Titan, Claude, Llama, Mistral,
+and other models via the Converse API — no separate API key required.
+
+```bash
+finops config set llm.provider bedrock
+finops config set llm.model amazon.nova-pro-v1:0
+finops config set llm.bedrock_region us-east-1
+```
+
+The agent uses your existing AWS credentials (CLI profile, IAM role, or env vars).
+Make sure the IAM principal has `bedrock:InvokeModel` permission.
+
+Other Bedrock model IDs you can use:
+- `amazon.titan-text-premier-v1:0`
+- `anthropic.claude-3-sonnet-20240229-v1:0`
+- `meta.llama3-70b-instruct-v1:0`
+
+### Option 6 — Ollama (fully local, free)
 
 Install [Ollama](https://ollama.ai) and pull a model:
 
@@ -678,6 +697,7 @@ finops summary --output plain     # Plain text for piping / grep
      │ Forecast   │  │ Client     │
      │ Contrib.   │  │ (OpenAI /  │
      └─────┬──────┘  │  Anthropic │
+           │         │  Bedrock / │
            │         │  Groq /    │
      ┌─────▼──────┐  │  Ollama)   │
      │  Cloud     │  └────────────┘
@@ -739,7 +759,7 @@ finops-agent/
 │   ├── contributors.py         # Top services, regions, resources by cost
 │   └── constants.py            # All configurable thresholds in one place
 ├── llm/
-│   ├── client.py               # OpenAI, Anthropic, and OpenAI-compatible (Groq/Ollama)
+│   ├── client.py               # OpenAI, Anthropic, Bedrock, and OpenAI-compatible (Groq/Ollama)
 │   ├── prompt_builder.py       # Context-aware prompt construction
 │   └── sanitizer.py            # Prompt injection guard + data redaction
 ├── storage/
@@ -803,10 +823,11 @@ oci:
   profile: ""                   # OCI config profile (empty = DEFAULT)
 
 llm:
-  provider: local               # openai | anthropic | local (for Groq/Gemini/Ollama)
+  provider: local               # openai | anthropic | bedrock | local (for Groq/Gemini/Ollama)
   api_key: ""
   model: llama-3.3-70b-versatile
   base_url: https://api.groq.com/openai/v1
+  bedrock_region: us-east-1     # AWS region for Bedrock (only used when provider=bedrock)
 
 storage:
   path: ~/.finops-agent/finops.db
@@ -881,7 +902,7 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting and the full security
 - [x] Anomaly detection engine (cost spikes, new high-cost resources, scaling events)
 - [x] Waste detection engine (unattached disks, stopped instances, idle NATs, unused EIPs)
 - [x] Cost forecasting (linear regression + trend)
-- [x] LLM-powered explanations (OpenAI, Anthropic, Groq, Gemini, Ollama)
+- [x] LLM-powered explanations (OpenAI, Anthropic, Amazon Bedrock, Groq, Gemini, Ollama)
 - [x] CLI with table/JSON/plain output
 - [x] Azure Cost Management + resource collection (VMs, Disks, LBs, AKS, Storage, App Service)
 - [x] OCI Usage API + resource collection (Compute, Block Volumes, LBs, OKE)
