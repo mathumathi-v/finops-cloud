@@ -16,6 +16,7 @@ class LLMProvider(Enum):
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
     LOCAL = "local"
+    BEDROCK = "bedrock"
 
 
 class LLMClient:
@@ -27,11 +28,13 @@ class LLMClient:
         api_key: str,
         model: str,
         base_url: str = "",
+        bedrock_region: str = "us-east-1",
     ) -> None:
         self._provider = LLMProvider(provider)
         self._api_key = api_key
         self._model = model
         self._base_url = base_url
+        self._bedrock_region = bedrock_region
 
     def explain(self, system_prompt: str, user_prompt: str) -> str:
         """Send a prompt to the configured LLM and return the response text."""
@@ -41,6 +44,8 @@ class LLMClient:
             return self._call_anthropic(system_prompt, user_prompt)
         if self._provider == LLMProvider.LOCAL:
             return self._call_local(system_prompt, user_prompt)
+        if self._provider == LLMProvider.BEDROCK:
+            return self._call_bedrock(system_prompt, user_prompt)
 
         msg = f"Unsupported LLM provider: {self._provider}"
         raise ValueError(msg)
@@ -98,3 +103,31 @@ class LLMClient:
         resp.raise_for_status()
         data = resp.json()
         return data["choices"][0]["message"]["content"]
+
+    def _call_bedrock(self, system_prompt: str, user_prompt: str) -> str:
+        """Call Amazon Bedrock (Nova, Titan, or any Converse-compatible model)."""
+        import json
+
+        import boto3
+
+        client = boto3.client("bedrock-runtime", region_name=self._bedrock_region)
+
+        system = [{"text": system_prompt}]
+        messages = [{"role": "user", "content": [{"text": user_prompt}]}]
+
+        inference_config: dict[str, Any] = {
+            "temperature": 0.3,
+            "maxTokens": 2000,
+        }
+
+        response = client.converse(
+            modelId=self._model,
+            system=system,
+            messages=messages,
+            inferenceConfig=inference_config,
+        )
+
+        output = response.get("output", {})
+        message = output.get("message", {})
+        content_blocks = message.get("content", [])
+        return content_blocks[0].get("text", "") if content_blocks else ""

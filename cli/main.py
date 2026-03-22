@@ -41,6 +41,7 @@ def _get_llm_client(config: dict[str, Any]) -> LLMClient:
         api_key=llm_cfg.get("api_key", ""),
         model=llm_cfg.get("model", "gpt-4o"),
         base_url=llm_cfg.get("base_url", ""),
+        bedrock_region=llm_cfg.get("bedrock_region", "us-east-1"),
     )
 
 
@@ -131,7 +132,7 @@ def explain_spike(
 
     # LLM explanation
     llm_cfg = config.get("llm", {})
-    if llm_cfg.get("api_key"):
+    if llm_cfg.get("api_key") or llm_cfg.get("provider") == "bedrock":
         from llm.prompt_builder import build_spike_prompt
 
         client = _get_llm_client(config)
@@ -294,7 +295,7 @@ def explain_bill(
     }
 
     llm_cfg = config.get("llm", {})
-    if llm_cfg.get("api_key"):
+    if llm_cfg.get("api_key") or llm_cfg.get("provider") == "bedrock":
         from llm.prompt_builder import build_bill_prompt
 
         client = _get_llm_client(config)
