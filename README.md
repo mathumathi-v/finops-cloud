@@ -64,26 +64,69 @@ your billing data on their servers. finops-agent is different:
 
 ## Quick Start
 
+### Prerequisites
+
+finops-agent requires **Python 3.11 or newer**. Check your version first:
+
+```bash
+python3 --version
+```
+
+If you're on Python 3.10 or older (common on Ubuntu 22.04), install 3.11 first:
+
+```bash
+sudo apt update
+sudo apt install python3.11 python3.11-venv -y
+python3.11 --version   # should print 3.11.x
+```
+
 ### 1. Install
 
 ```bash
 git clone https://github.com/mathumathi-v/finops-cloud.git
-cd finops-cloud  # or rename to finops-agent
-pip install -e .
+cd finops-cloud
+```
+
+**Create and activate a virtual environment using Python 3.11** (required — the package will silently install as UNKNOWN if you skip this and your system Python is < 3.11):
+
+```bash
+python3.11 -m venv ~/.venvs/finops
+source ~/.venvs/finops/bin/activate
+```
+
+Install the package:
+
+```bash
+pip install .
+```
+
+> **Note:** `pip install -e .` (editable mode) is not supported because the build backend does not implement PEP 660. Use `pip install .` instead. If you need to make code changes, re-run `pip install .` after each change.
+
+Verify the installation:
+
+```bash
+pip show finops-agent   # should show Version: 0.3.2
+finops --help
+```
+
+To reactivate the environment in a new terminal session:
+
+```bash
+source ~/.venvs/finops/bin/activate
 ```
 
 For cloud-specific dependencies:
 
 ```bash
-pip install -e ".[gcp]"     # GCP support
-pip install -e ".[azure]"   # Azure support
-pip install -e ".[oci]"     # OCI support
+pip install ".[gcp]"     # GCP support
+pip install ".[azure]"   # Azure support
+pip install ".[oci]"     # OCI support
 ```
 
 For development (linting, type checking, tests):
 
 ```bash
-pip install -e ".[dev]"
+pip install ".[dev]"
 ```
 
 ### Alternative: Docker
@@ -237,6 +280,15 @@ the instance metadata credentials automatically.
 finops config set aws.enabled true
 finops config set aws.regions '["us-east-1", "eu-west-2"]'
 ```
+
+### Verify credentials before collecting
+
+```bash
+aws sts get-caller-identity
+```
+
+This should return your account ID and IAM user/role ARN. If it fails, your
+credentials are not configured correctly — re-run `aws configure`.
 
 ### How AWS data flows
 
@@ -638,8 +690,8 @@ finops config set llm.api_key ollama
 
 ```bash
 --provider aws|gcp|azure|oci|all  # Filter by cloud provider (default: aws)
---output json|table|plain       # Output format (default: table)
---since YYYY-MM-DD              # Filter from date
+--output json|table|plain         # Output format (default: table)
+--since YYYY-MM-DD                # Filter from date
 ```
 
 ### Output formats
@@ -843,15 +895,67 @@ group or other users.
 
 ---
 
+## Troubleshooting
+
+### Package installs as UNKNOWN 0.0.0
+
+This happens when the build runs under Python < 3.11. The `requires-python = ">= 3.11"` constraint in `pyproject.toml` causes setuptools to silently produce an empty package when the constraint is not met.
+
+**Fix:** Always install inside a Python 3.11 virtual environment:
+
+```bash
+# Install Python 3.11 if needed (Ubuntu/Debian)
+sudo apt install python3.11 python3.11-venv -y
+
+# Create and activate a venv
+python3.11 -m venv ~/.venvs/finops
+source ~/.venvs/finops/bin/activate
+
+# Confirm version
+python --version   # must show 3.11.x or newer
+
+# Install
+pip install .
+```
+
+### `pip install -e .` fails with "build_editable hook" error
+
+The build backend (`setuptools`) in this project does not support PEP 660 editable installs. Use `pip install .` instead. Re-run it after making code changes.
+
+### `finops: command not found` after installing
+
+The venv is not active. Run:
+
+```bash
+source ~/.venvs/finops/bin/activate
+```
+
+Add this to your `~/.bashrc` or `~/.zshrc` to activate automatically:
+
+```bash
+echo 'source ~/.venvs/finops/bin/activate' >> ~/.bashrc
+```
+
+### AWS Cost Explorer returns no data
+
+Cost Explorer requires data to exist in your account. New accounts may have no
+historical cost data. Wait 24 hours after first using AWS services, then re-run
+`finops collect`.
+
+Also confirm Cost Explorer is enabled:
+> AWS Console → Billing → Cost Explorer → Enable
+
+---
+
 ## Development
 
 ```bash
-pip install -e ".[dev]"   # Install with dev dependencies
+pip install ".[dev]"   # Install with dev dependencies
 
-make lint                  # ruff check
-make typecheck             # mypy
-make test                  # pytest (skips integration tests)
-make check                 # all three
+make lint              # ruff check
+make typecheck         # mypy
+make test              # pytest (skips integration tests)
+make check             # all three
 ```
 
 ### Running integration tests (requires real credentials)
