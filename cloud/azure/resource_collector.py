@@ -818,39 +818,44 @@ class AzureResourceCollector:
                 "Install it with: pip install azure-mgmt-network"
             ) from exc
 
+        from azure.mgmt.resource import ResourceManagementClient  # type: ignore[import-untyped]
+
         client = NetworkManagementClient(self._credential, self._subscription_id)  # type: ignore[arg-type]
+        rm_client = ResourceManagementClient(self._credential, self._subscription_id)  # type: ignore[arg-type]
         snapshots: list[ResourceSnapshot] = []
 
-        for gw in client.virtual_network_gateways.list_all():
-            location = gw.location or "unknown"
-            sku_name = gw.sku.name if gw.sku else ""
-            tags: dict[str, str] = dict(gw.tags or {})
-            rg = _parse_resource_group(gw.id or "")
+        for rg_item in rm_client.resource_groups.list():
+            rg_name = rg_item.name or ""
+            for gw in client.virtual_network_gateways.list(rg_name):
+                location = gw.location or "unknown"
+                sku_name = gw.sku.name if gw.sku else ""
+                tags: dict[str, str] = dict(gw.tags or {})
+                rg = _parse_resource_group(gw.id or "")
 
-            daily = _daily_cost_for_vpn_gateway(sku_name)
-            snapshots.append(
-                ResourceSnapshot(
-                    resource_id=gw.id or gw.name or "",
-                    provider="azure",
-                    account_id=self._subscription_id,
-                    type="network",
-                    service="VPNGateway",
-                    name=gw.name or "",
-                    region=location,
-                    daily_cost=daily,
-                    monthly_cost_estimate=round(daily * _DAYS_PER_MONTH, 4),
-                    currency="USD",
-                    state="active",
-                    tags=tags,
-                    metadata={
-                        "sku": sku_name,
-                        "resource_group": rg,
-                        "gateway_type": str(gw.gateway_type or ""),
-                        "vpn_type": str(gw.vpn_type or ""),
-                    },
-                    snapshot_time=self._snapshot_time,
+                daily = _daily_cost_for_vpn_gateway(sku_name)
+                snapshots.append(
+                    ResourceSnapshot(
+                        resource_id=gw.id or gw.name or "",
+                        provider="azure",
+                        account_id=self._subscription_id,
+                        type="network",
+                        service="VPNGateway",
+                        name=gw.name or "",
+                        region=location,
+                        daily_cost=daily,
+                        monthly_cost_estimate=round(daily * _DAYS_PER_MONTH, 4),
+                        currency="USD",
+                        state="active",
+                        tags=tags,
+                        metadata={
+                            "sku": sku_name,
+                            "resource_group": rg,
+                            "gateway_type": str(gw.gateway_type or ""),
+                            "vpn_type": str(gw.vpn_type or ""),
+                        },
+                        snapshot_time=self._snapshot_time,
+                    )
                 )
-            )
 
         return snapshots
 
