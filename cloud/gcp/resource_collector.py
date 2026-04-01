@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from cloud.pricing import PricingProvider
 from cost_model.models import ResourceSnapshot
+from intelligence.constants import IDLE_CPU_LOOKBACK_DAYS
 
 logger = logging.getLogger(__name__)
 
@@ -40,17 +42,35 @@ _PD_PRICE_PER_GB_MONTH: dict[str, float] = {
     "hyperdisk-balanced": 0.12,
 }
 
+# Cloud SQL tier → approximate hourly on-demand USD (us-central1).
+_CLOUD_SQL_HOURLY_USD: dict[str, float] = {
+    "db-f1-micro": 0.0150, "db-g1-small": 0.0500,
+    "db-n1-standard-1": 0.0965, "db-n1-standard-2": 0.1930,
+    "db-n1-standard-4": 0.3860, "db-n1-standard-8": 0.7720,
+    "db-n1-standard-16": 1.5440,
+    "db-n1-highmem-2": 0.2370, "db-n1-highmem-4": 0.4740,
+    "db-n1-highmem-8": 0.9480, "db-n1-highmem-16": 1.8960,
+    "db-custom-1-3840": 0.0590, "db-custom-2-7680": 0.1180,
+    "db-custom-4-15360": 0.2360, "db-custom-8-30720": 0.4720,
+}
+
+# Cloud SQL storage per-GB per-month USD.
+_CLOUD_SQL_STORAGE_GB_MONTH: dict[str, float] = {
+    "pd-ssd": 0.17, "pd-hdd": 0.09,
+}
+
 _HOURS_PER_DAY = 24.0
 _DAYS_PER_MONTH = 30.0
 
 
-def _daily_cost_for_instance(machine_type: str, status: str) -> float:
+def _daily_cost_for_instance(
+    machine_type: str, status: str, hourly_override: float | None = None,
+) -> float:
     """Estimate daily cost for a Compute Engine instance from machine type."""
     if status.lower() != "running":
         return 0.0
-    # Strip zone prefix if present (e.g. "zones/us-central1-a/machineTypes/n1-standard-1")
     mt = machine_type.rsplit("/", 1)[-1].lower()
-    hourly = _MACHINE_HOURLY_USD.get(mt, 0.0)
+    hourly = hourly_override if hourly_override is not None else _MACHINE_HOURLY_USD.get(mt, 0.0)
     return round(hourly * _HOURS_PER_DAY, 6)
 
 
@@ -61,6 +81,16 @@ def _daily_cost_for_disk(disk_type: str, size_gb: int) -> float:
     return round(size_gb * monthly_per_gb / _DAYS_PER_MONTH, 6)
 
 
+def _daily_cost_for_cloud_sql(tier: str, storage_gb: int, storage_type: str) -> float:
+    """Estimate daily cost for a Cloud SQL instance from tier and storage."""
+    hourly = _CLOUD_SQL_HOURLY_USD.get(tier.lower(), 0.0)
+    compute_daily = hourly * _HOURS_PER_DAY
+    st_key = "pd-ssd" if "ssd" in storage_type.lower() else "pd-hdd"
+    storage_monthly_per_gb = _CLOUD_SQL_STORAGE_GB_MONTH.get(st_key, 0.17)
+    storage_daily = storage_gb * storage_monthly_per_gb / _DAYS_PER_MONTH
+    return round(compute_daily + storage_daily, 6)
+
+
 def _zone_to_region(zone: str) -> str:
     """Convert a GCP zone (us-central1-a) to a region (us-central1)."""
     parts = zone.rsplit("/", 1)[-1].rsplit("-", 1)
@@ -68,21 +98,24 @@ def _zone_to_region(zone: str) -> str:
 
 
 class GCPResourceCollector:
-    """Fetches live GCP resource metadata (Compute VMs, Disks, LBs, GKE)."""
+    """Fetches live GCP resource metadata."""
 
     def __init__(
         self,
         project_id: str,
         credentials: object | None = None,
+        pricing_provider: PricingProvider | None = None,
     ) -> None:
         """
         Args:
             project_id: GCP project ID to collect resources from.
             credentials: Optional google.oauth2 credentials. If None,
                 Application Default Credentials are used.
+            pricing_provider: Optional dynamic pricing provider.
         """
         self._project_id = project_id
         self._credentials = credentials
+        self._pricing = pricing_provider
         self._snapshot_time = datetime.now(UTC)
 
     def collect_resources(self) -> list[ResourceSnapshot]:
@@ -94,6 +127,12 @@ class GCPResourceCollector:
             ("Persistent Disks", self._collect_disks),
             ("Load Balancers", self._collect_load_balancers),
             ("GKE clusters", self._collect_gke),
+            ("Cloud SQL", self._collect_cloud_sql),
+            ("Cloud Storage", self._collect_gcs),
+            ("Cloud Run", self._collect_cloud_run),
+            ("Cloud Functions", self._collect_cloud_functions),
+            ("BigQuery", self._collect_bigquery),
+            ("Pub/Sub", self._collect_pubsub),
         ]
         for name, fn in collectors:
             try:
@@ -371,6 +410,376 @@ class GCPResourceCollector:
                         },
                         snapshot_time=self._snapshot_time,
                     )
+                )
+
+        return snapshots
+
+    # ------------------------------------------------------------------
+    # Cloud SQL instances
+    # ------------------------------------------------------------------
+
+    def _collect_cloud_sql(self) -> list[ResourceSnapshot]:
+        """List all Cloud SQL instances in the project."""
+        try:
+            from googleapiclient.discovery import build  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise ImportError(
+                "google-api-python-client is required for Cloud SQL collection. "
+                "Install it with: pip install google-api-python-client"
+            ) from exc
+
+        kwargs: dict[str, Any] = {}
+        if self._credentials:
+            kwargs["credentials"] = self._credentials
+        service = build("sqladmin", "v1", **kwargs, cache_discovery=False)
+
+        snapshots: list[ResourceSnapshot] = []
+        resp = service.instances().list(project=self._project_id).execute()
+
+        for inst in resp.get("items", []):
+            state = inst.get("state", "UNKNOWN").lower()
+            tier = inst.get("settings", {}).get("tier", "")
+            storage_gb = int(inst.get("settings", {}).get("dataDiskSizeGb", 0))
+            storage_type = inst.get("settings", {}).get("dataDiskType", "PD_SSD")
+            region = inst.get("region", "")
+            labels: dict[str, str] = dict(inst.get("settings", {}).get("userLabels", {}))
+
+            daily = _daily_cost_for_cloud_sql(tier, storage_gb, storage_type)
+            snapshots.append(
+                ResourceSnapshot(
+                    resource_id=inst.get("selfLink", inst.get("name", "")),
+                    provider="gcp",
+                    account_id=self._project_id,
+                    type="database",
+                    service="CloudSQL",
+                    name=inst.get("name", ""),
+                    region=region,
+                    daily_cost=daily,
+                    monthly_cost_estimate=round(daily * _DAYS_PER_MONTH, 4),
+                    currency="USD",
+                    state=state,
+                    tags=labels,
+                    metadata={
+                        "database_version": inst.get("databaseVersion", ""),
+                        "tier": tier,
+                        "data_disk_size_gb": storage_gb,
+                        "data_disk_type": storage_type,
+                        "availability_type": inst.get("settings", {}).get(
+                            "availabilityType", ""
+                        ),
+                    },
+                    snapshot_time=self._snapshot_time,
+                )
+            )
+
+        return snapshots
+
+    # ------------------------------------------------------------------
+    # Cloud Storage buckets
+    # ------------------------------------------------------------------
+
+    def _collect_gcs(self) -> list[ResourceSnapshot]:
+        """List all Cloud Storage buckets in the project."""
+        try:
+            from google.cloud import storage  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise ImportError(
+                "google-cloud-storage is required for GCS collection. "
+                "Install it with: pip install google-cloud-storage"
+            ) from exc
+
+        kwargs: dict[str, Any] = {"project": self._project_id}
+        if self._credentials:
+            kwargs["credentials"] = self._credentials
+        client = storage.Client(**kwargs)
+
+        snapshots: list[ResourceSnapshot] = []
+        for bucket in client.list_buckets():
+            labels: dict[str, str] = dict(bucket.labels or {})
+            snapshots.append(
+                ResourceSnapshot(
+                    resource_id=f"gs://{bucket.name}",
+                    provider="gcp",
+                    account_id=self._project_id,
+                    type="storage",
+                    service="GCS",
+                    name=bucket.name,
+                    region=bucket.location or "unknown",
+                    daily_cost=0.0,  # size-dependent; use billing export
+                    monthly_cost_estimate=0.0,
+                    currency="USD",
+                    state="active",
+                    tags=labels,
+                    metadata={
+                        "storage_class": bucket.storage_class or "",
+                        "location_type": bucket.location_type or "",
+                        "versioning_enabled": bool(bucket.versioning_enabled),
+                    },
+                    snapshot_time=self._snapshot_time,
+                )
+            )
+
+        return snapshots
+
+    # ------------------------------------------------------------------
+    # Cloud Run services
+    # ------------------------------------------------------------------
+
+    def _collect_cloud_run(self) -> list[ResourceSnapshot]:
+        """List all Cloud Run services in the project."""
+        try:
+            from google.cloud import run_v2  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise ImportError(
+                "google-cloud-run is required for Cloud Run collection. "
+                "Install it with: pip install google-cloud-run"
+            ) from exc
+
+        kwargs: dict[str, Any] = {}
+        if self._credentials:
+            kwargs["credentials"] = self._credentials
+        client = run_v2.ServicesClient(**kwargs)
+        parent = f"projects/{self._project_id}/locations/-"
+
+        snapshots: list[ResourceSnapshot] = []
+        for svc in client.list_services(parent=parent):
+            name = svc.name or ""
+            # Extract region from name: projects/p/locations/REGION/services/NAME
+            parts = name.split("/")
+            region = parts[3] if len(parts) >= 5 else "unknown"
+            short_name = parts[-1] if parts else name
+            labels: dict[str, str] = dict(svc.labels or {})
+
+            snapshots.append(
+                ResourceSnapshot(
+                    resource_id=name,
+                    provider="gcp",
+                    account_id=self._project_id,
+                    type="serverless",
+                    service="CloudRun",
+                    name=short_name,
+                    region=region,
+                    daily_cost=0.0,  # request/CPU based
+                    monthly_cost_estimate=0.0,
+                    currency="USD",
+                    state="active",
+                    tags=labels,
+                    metadata={
+                        "uri": svc.uri or "",
+                        "launch_stage": str(svc.launch_stage) if svc.launch_stage else "",
+                    },
+                    snapshot_time=self._snapshot_time,
+                )
+            )
+
+        return snapshots
+
+    # ------------------------------------------------------------------
+    # Cloud Functions
+    # ------------------------------------------------------------------
+
+    def _collect_cloud_functions(self) -> list[ResourceSnapshot]:
+        """List all Cloud Functions (v2) in the project."""
+        try:
+            from google.cloud.functions_v2 import FunctionServiceClient  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise ImportError(
+                "google-cloud-functions is required for Cloud Functions collection. "
+                "Install it with: pip install google-cloud-functions"
+            ) from exc
+
+        kwargs: dict[str, Any] = {}
+        if self._credentials:
+            kwargs["credentials"] = self._credentials
+        client = FunctionServiceClient(**kwargs)
+        parent = f"projects/{self._project_id}/locations/-"
+
+        snapshots: list[ResourceSnapshot] = []
+        for fn in client.list_functions(parent=parent):
+            name = fn.name or ""
+            parts = name.split("/")
+            region = parts[3] if len(parts) >= 5 else "unknown"
+            short_name = parts[-1] if parts else name
+            labels: dict[str, str] = dict(fn.labels or {})
+
+            snapshots.append(
+                ResourceSnapshot(
+                    resource_id=name,
+                    provider="gcp",
+                    account_id=self._project_id,
+                    type="serverless",
+                    service="CloudFunctions",
+                    name=short_name,
+                    region=region,
+                    daily_cost=0.0,  # invocation-based
+                    monthly_cost_estimate=0.0,
+                    currency="USD",
+                    state=str(fn.state).lower() if fn.state else "active",
+                    tags=labels,
+                    metadata={
+                        "runtime": fn.build_config.runtime if fn.build_config else "",
+                        "entry_point": fn.build_config.entry_point if fn.build_config else "",
+                        "environment": str(fn.environment) if fn.environment else "",
+                    },
+                    snapshot_time=self._snapshot_time,
+                )
+            )
+
+        return snapshots
+
+    # ------------------------------------------------------------------
+    # BigQuery datasets
+    # ------------------------------------------------------------------
+
+    def _collect_bigquery(self) -> list[ResourceSnapshot]:
+        """List all BigQuery datasets in the project."""
+        try:
+            from google.cloud import bigquery  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise ImportError(
+                "google-cloud-bigquery is required. "
+                "Install it with: pip install google-cloud-bigquery"
+            ) from exc
+
+        kwargs: dict[str, Any] = {"project": self._project_id}
+        if self._credentials:
+            kwargs["credentials"] = self._credentials
+        client = bigquery.Client(**kwargs)
+
+        snapshots: list[ResourceSnapshot] = []
+        for dataset in client.list_datasets():
+            ref = dataset.reference
+            ds = client.get_dataset(ref)
+            labels: dict[str, str] = dict(ds.labels or {})
+
+            snapshots.append(
+                ResourceSnapshot(
+                    resource_id=str(ref),
+                    provider="gcp",
+                    account_id=self._project_id,
+                    type="managed_service",
+                    service="BigQuery",
+                    name=dataset.dataset_id,
+                    region=ds.location or "US",
+                    daily_cost=0.0,  # query + storage based
+                    monthly_cost_estimate=0.0,
+                    currency="USD",
+                    state="active",
+                    tags=labels,
+                    metadata={
+                        "default_table_expiration_ms": ds.default_table_expiration_ms,
+                        "description": ds.description or "",
+                    },
+                    snapshot_time=self._snapshot_time,
+                )
+            )
+
+        return snapshots
+
+    # ------------------------------------------------------------------
+    # Pub/Sub topics
+    # ------------------------------------------------------------------
+
+    def _collect_pubsub(self) -> list[ResourceSnapshot]:
+        """List all Pub/Sub topics in the project."""
+        try:
+            from google.cloud import pubsub_v1  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise ImportError(
+                "google-cloud-pubsub is required. "
+                "Install it with: pip install google-cloud-pubsub"
+            ) from exc
+
+        kwargs: dict[str, Any] = {}
+        if self._credentials:
+            kwargs["credentials"] = self._credentials
+        publisher = pubsub_v1.PublisherClient(**kwargs)
+        project_path = f"projects/{self._project_id}"
+
+        snapshots: list[ResourceSnapshot] = []
+        for topic in publisher.list_topics(request={"project": project_path}):
+            name = topic.name or ""
+            short_name = name.rsplit("/", 1)[-1]
+            labels: dict[str, str] = dict(topic.labels or {})
+
+            snapshots.append(
+                ResourceSnapshot(
+                    resource_id=name,
+                    provider="gcp",
+                    account_id=self._project_id,
+                    type="managed_service",
+                    service="PubSub",
+                    name=short_name,
+                    region="global",
+                    daily_cost=0.0,  # message-volume based
+                    monthly_cost_estimate=0.0,
+                    currency="USD",
+                    state="active",
+                    tags=labels,
+                    metadata={},
+                    snapshot_time=self._snapshot_time,
+                )
+            )
+
+        return snapshots
+
+    # ------------------------------------------------------------------
+    # CPU Metrics (Cloud Monitoring)
+    # ------------------------------------------------------------------
+
+    def collect_cpu_metrics(self, snapshots: list[ResourceSnapshot]) -> list[ResourceSnapshot]:
+        """Enrich running GCE instances with average CPU utilization from Cloud Monitoring."""
+        try:
+            from google.cloud import monitoring_v3  # type: ignore[import-untyped]
+            from google.protobuf.timestamp_pb2 import Timestamp  # type: ignore[import-untyped]
+        except ImportError:
+            logger.debug("google-cloud-monitoring not installed, skipping CPU metrics")
+            return snapshots
+
+        kwargs: dict[str, Any] = {}
+        if self._credentials:
+            kwargs["credentials"] = self._credentials
+        try:
+            client = monitoring_v3.MetricServiceClient(**kwargs)
+        except Exception:
+            logger.warning("Could not create Cloud Monitoring client", exc_info=True)
+            return snapshots
+
+        now = datetime.now(UTC)
+        start = now - timedelta(days=IDLE_CPU_LOOKBACK_DAYS)
+
+        for snap in snapshots:
+            if snap.service != "GCE" or snap.state != "running":
+                continue
+            try:
+                # Extract instance ID from self_link
+                instance_id = snap.resource_id.rsplit("/", 1)[-1]
+                interval = monitoring_v3.TimeInterval(
+                    end_time=Timestamp(seconds=int(now.timestamp())),
+                    start_time=Timestamp(seconds=int(start.timestamp())),
+                )
+                results = client.list_time_series(
+                    request={
+                        "name": f"projects/{self._project_id}",
+                        "filter": (
+                            'metric.type="compute.googleapis.com/instance/cpu/utilization" '
+                            f'AND resource.labels.instance_id="{instance_id}"'
+                        ),
+                        "interval": interval,
+                        "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
+                    }
+                )
+                values: list[float] = []
+                for ts in results:
+                    for point in ts.points:
+                        values.append(point.value.double_value * 100)  # fraction → %
+                if values:
+                    snap.metadata["avg_cpu_percent"] = round(
+                        sum(values) / len(values), 2,
+                    )
+            except Exception:
+                logger.debug(
+                    "Cloud Monitoring CPU lookup failed for %s", snap.resource_id, exc_info=True,
                 )
 
         return snapshots

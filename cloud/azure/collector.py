@@ -33,7 +33,9 @@ def _build_credential(
     except ImportError as exc:
         raise ImportError(
             "azure-identity is required for Azure collection. "
-            "Install it with: pip install azure-identity"
+            "Install it with: pip install 'finops-agent[azure]' "
+            "or: pip install azure-identity cffi\n"
+            f"  Original error: {exc}"
         ) from exc
 
     if tenant_id and client_id and client_secret:

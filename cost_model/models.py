@@ -45,6 +45,26 @@ class CostSnapshot:
 
 
 @dataclass
+class SavingsPlanSnapshot:
+    """A point-in-time snapshot of a Reserved Instance or Savings Plan."""
+
+    provider: str
+    account_id: str
+    plan_type: str  # "reserved_instance", "savings_plan", "committed_use_discount"
+    offering_id: str
+    service: str
+    region: str
+    start_date: date
+    end_date: date
+    commitment_usd_per_hour: float
+    utilization_percent: float
+    coverage_percent: float
+    state: str  # "active", "expired", "pending"
+    metadata: dict[str, object] = field(default_factory=dict)
+    snapshot_time: datetime = field(default_factory=_utcnow)
+
+
+@dataclass
 class AnomalyEvent:
     """A detected cost anomaly."""
 

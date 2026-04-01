@@ -609,6 +609,136 @@ class TestAzureResourceCollectorAppServicePlans:
 # ---------------------------------------------------------------------------
 
 
+class TestAzureResourceCollectorSQLDatabases:
+    def test_collect_sql_databases(self) -> None:
+        collector = _make_collector()
+
+        mock_server = MagicMock()
+        mock_server.name = "sql-server-1"
+        mock_server.id = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Sql/servers/sql-server-1"
+        mock_server.location = "eastus"
+
+        mock_db = MagicMock()
+        mock_db.name = "mydb"
+        mock_db.id = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Sql/servers/sql-server-1/databases/mydb"
+        mock_db.location = "eastus"
+        mock_db.sku = MagicMock()
+        mock_db.sku.name = "S1"
+        mock_db.sku.tier = "Standard"
+        mock_db.tags = {}
+        mock_db.status = "Online"
+        mock_db.max_size_bytes = 268435456000
+        mock_db.elastic_pool_id = None
+
+        mock_sql_client = MagicMock()
+        mock_sql_client.servers.list.return_value = [mock_server]
+        mock_sql_client.databases.list_by_server.return_value = [mock_db]
+
+        mock_sql_module = MagicMock()
+        mock_sql_module.SqlManagementClient.return_value = mock_sql_client
+
+        with patch.dict("sys.modules", {"azure.mgmt.sql": mock_sql_module}):
+            snapshots = collector._collect_sql_databases()
+
+        assert len(snapshots) == 1
+        s = snapshots[0]
+        assert s.type == "database"
+        assert s.service == "AzureSQL"
+        assert s.daily_cost > 0
+        assert s.metadata["server_name"] == "sql-server-1"
+
+
+class TestAzureResourceCollectorFunctionApps:
+    def test_collect_function_apps(self) -> None:
+        collector = _make_collector()
+
+        mock_app = MagicMock()
+        mock_app.name = "my-func-app"
+        mock_app.id = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Web/sites/my-func-app"
+        mock_app.kind = "functionapp,linux"
+        mock_app.location = "eastus"
+        mock_app.state = "Running"
+        mock_app.tags = {}
+        mock_app.default_host_name = "my-func-app.azurewebsites.net"
+        mock_app.https_only = True
+
+        mock_web_client = MagicMock()
+        mock_web_client.web_apps.list.return_value = [mock_app]
+        mock_web_module = MagicMock()
+        mock_web_module.WebSiteManagementClient.return_value = mock_web_client
+
+        with patch.dict("sys.modules", {"azure.mgmt.web": mock_web_module}):
+            snapshots = collector._collect_function_apps()
+
+        assert len(snapshots) == 1
+        s = snapshots[0]
+        assert s.type == "serverless"
+        assert s.service == "FunctionApp"
+
+    def test_skips_non_function_apps(self) -> None:
+        collector = _make_collector()
+
+        mock_app = MagicMock()
+        mock_app.kind = "app"  # Not a function app
+        mock_app.name = "webapp"
+
+        mock_web_client = MagicMock()
+        mock_web_client.web_apps.list.return_value = [mock_app]
+        mock_web_module = MagicMock()
+        mock_web_module.WebSiteManagementClient.return_value = mock_web_client
+
+        with patch.dict("sys.modules", {"azure.mgmt.web": mock_web_module}):
+            snapshots = collector._collect_function_apps()
+
+        assert len(snapshots) == 0
+
+
+class TestAzureResourceCollectorCosmosDB:
+    def test_collect_cosmos_db(self) -> None:
+        collector = _make_collector()
+
+        mock_account = MagicMock()
+        mock_account.name = "my-cosmos"
+        mock_account.id = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.DocumentDB/databaseAccounts/my-cosmos"
+        mock_account.location = "eastus"
+        mock_account.tags = {}
+        mock_account.kind = "GlobalDocumentDB"
+        mock_account.consistency_policy = MagicMock()
+        mock_account.consistency_policy.default_consistency_level = "Session"
+        mock_account.enable_automatic_failover = True
+        mock_account.database_account_offer_type = "Standard"
+
+        mock_cosmos_client = MagicMock()
+        mock_cosmos_client.database_accounts.list.return_value = [mock_account]
+        mock_cosmos_module = MagicMock()
+        mock_cosmos_module.CosmosDBManagementClient.return_value = mock_cosmos_client
+
+        with patch.dict("sys.modules", {"azure.mgmt.cosmosdb": mock_cosmos_module}):
+            snapshots = collector._collect_cosmos_db()
+
+        assert len(snapshots) == 1
+        s = snapshots[0]
+        assert s.type == "database"
+        assert s.service == "CosmosDB"
+
+
+class TestAzureNewPricingHelpers:
+    def test_daily_cost_sql_dtu_s1(self) -> None:
+        from cloud.azure.resource_collector import _daily_cost_for_sql_db
+
+        assert _daily_cost_for_sql_db("S1") == pytest.approx(0.967)
+
+    def test_daily_cost_sql_basic(self) -> None:
+        from cloud.azure.resource_collector import _daily_cost_for_sql_db
+
+        assert _daily_cost_for_sql_db("Basic") == pytest.approx(0.1667)
+
+    def test_daily_cost_vpn_gateway_vpngw1(self) -> None:
+        from cloud.azure.resource_collector import _daily_cost_for_vpn_gateway
+
+        assert _daily_cost_for_vpn_gateway("VpnGw1") == pytest.approx(0.19 * 24, rel=1e-4)
+
+
 class TestAzureCollectorCredentials:
     def test_builds_client_secret_credential_when_all_provided(self) -> None:
         with patch("azure.identity.ClientSecretCredential") as mock_csc:

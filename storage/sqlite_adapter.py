@@ -7,7 +7,7 @@ import sqlite3
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
-from cost_model.models import AnomalyEvent, CostSnapshot, ResourceSnapshot
+from cost_model.models import AnomalyEvent, CostSnapshot, ResourceSnapshot, SavingsPlanSnapshot
 from storage.base import StorageAdapter
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,24 @@ CREATE TABLE IF NOT EXISTS cost_snapshots (
     region TEXT,
     usage_type TEXT,
     cost_usd REAL,
+    snapshot_time TEXT
+);
+
+CREATE TABLE IF NOT EXISTS savings_plan_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    plan_type TEXT,
+    offering_id TEXT,
+    service TEXT,
+    region TEXT,
+    start_date TEXT,
+    end_date TEXT,
+    commitment_usd_per_hour REAL,
+    utilization_percent REAL,
+    coverage_percent REAL,
+    state TEXT,
+    metadata TEXT,
     snapshot_time TEXT
 );
 
@@ -172,6 +190,38 @@ class SQLiteAdapter(StorageAdapter):
         self._conn.commit()
         logger.info("Saved %d anomaly events", len(events))
 
+    def save_savings_plan_snapshots(self, snapshots: list[SavingsPlanSnapshot]) -> None:
+        """Persist a batch of savings plan snapshots."""
+        rows = [
+            (
+                s.provider,
+                s.account_id,
+                s.plan_type,
+                s.offering_id,
+                s.service,
+                s.region,
+                s.start_date.isoformat(),
+                s.end_date.isoformat(),
+                s.commitment_usd_per_hour,
+                s.utilization_percent,
+                s.coverage_percent,
+                s.state,
+                json.dumps(s.metadata, default=str),
+                s.snapshot_time.isoformat(),
+            )
+            for s in snapshots
+        ]
+        self._conn.executemany(
+            "INSERT INTO savings_plan_snapshots "
+            "(provider, account_id, plan_type, offering_id, service, region, "
+            "start_date, end_date, commitment_usd_per_hour, utilization_percent, "
+            "coverage_percent, state, metadata, snapshot_time) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        self._conn.commit()
+        logger.info("Saved %d savings plan snapshots", len(snapshots))
+
     # -- reads -----------------------------------------------------------------
 
     def get_cost_history(self, provider: str, days: int) -> list[CostSnapshot]:
@@ -192,6 +242,15 @@ class SQLiteAdapter(StorageAdapter):
             (provider,),
         )
         return [self._row_to_resource_snapshot(row) for row in cursor.fetchall()]
+
+    def get_savings_plan_snapshots(self, provider: str) -> list[SavingsPlanSnapshot]:
+        """Return savings plan snapshots for a provider."""
+        cursor = self._conn.execute(
+            "SELECT * FROM savings_plan_snapshots WHERE provider = ? "
+            "ORDER BY snapshot_time DESC",
+            (provider,),
+        )
+        return [self._row_to_savings_plan_snapshot(row) for row in cursor.fetchall()]
 
     def get_anomaly_events(self, provider: str, days: int) -> list[AnomalyEvent]:
         """Return anomaly events for the last N days."""
@@ -235,6 +294,25 @@ class SQLiteAdapter(StorageAdapter):
             region=row["region"],
             usage_type=row["usage_type"],
             cost_usd=row["cost_usd"],
+            snapshot_time=datetime.fromisoformat(row["snapshot_time"]),
+        )
+
+    @staticmethod
+    def _row_to_savings_plan_snapshot(row: sqlite3.Row) -> SavingsPlanSnapshot:
+        return SavingsPlanSnapshot(
+            provider=row["provider"],
+            account_id=row["account_id"],
+            plan_type=row["plan_type"],
+            offering_id=row["offering_id"],
+            service=row["service"],
+            region=row["region"],
+            start_date=date.fromisoformat(row["start_date"]),
+            end_date=date.fromisoformat(row["end_date"]),
+            commitment_usd_per_hour=row["commitment_usd_per_hour"],
+            utilization_percent=row["utilization_percent"],
+            coverage_percent=row["coverage_percent"],
+            state=row["state"],
+            metadata=json.loads(row["metadata"]) if row["metadata"] else {},
             snapshot_time=datetime.fromisoformat(row["snapshot_time"]),
         )
 

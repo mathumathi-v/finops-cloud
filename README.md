@@ -55,10 +55,10 @@ your billing data on their servers. finops-agent is different:
 
 | Cloud | Status | Cost Data | Resources Collected |
 |-------|--------|-----------|-------------------|
-| AWS | **Supported** | Cost Explorer API (daily, per service/region) | EC2, EBS, RDS, ELB/ALB, NAT Gateway, EKS |
-| GCP | **Supported** | BigQuery billing export (daily, per service/region) | Compute Engine VMs, Persistent Disks, Load Balancers, GKE |
-| Azure | **Supported** | Cost Management API (daily, per service/region) | VMs, Managed Disks, Load Balancers, AKS, Storage Accounts, App Service Plans |
-| OCI | **Supported** | Usage API (daily, per service/region) | Compute, Block Volumes, Load Balancers, OKE |
+| AWS | **Supported** | Cost Explorer API + RI/Savings Plan tracking | EC2, EBS, RDS, S3, ELB/ALB, NAT Gateway, EKS, Lambda, VPN, CloudFront, API Gateway |
+| GCP | **Supported** | BigQuery billing export (daily, per service/region) | Compute Engine VMs, Persistent Disks, Load Balancers, GKE, Cloud SQL, GCS, Cloud Run, Cloud Functions, BigQuery, Pub/Sub |
+| Azure | **Supported** | Cost Management API (daily, per service/region) | VMs, Managed Disks, Load Balancers, AKS, Storage Accounts, App Service Plans, SQL Databases, Function Apps, VPN Gateways, CDN, Cosmos DB |
+| OCI | **Supported** | Usage API (daily, per service/region) | Compute, Block Volumes, Load Balancers, OKE, Autonomous DB, Object Storage |
 
 ---
 
@@ -66,7 +66,19 @@ your billing data on their servers. finops-agent is different:
 
 ### Prerequisites
 
-finops-agent requires **Python 3.11 or newer**. Check your version first:
+#### System requirements
+
+| Requirement | Minimum | Notes |
+|-------------|---------|-------|
+| **Python** | 3.11+ | 3.12 also supported |
+| **pip** | 22.0+ | Comes with Python 3.11 |
+| **OS** | Linux, macOS, Windows (WSL) | Tested on Ubuntu 22.04/24.04, macOS 14+ |
+| **Disk** | ~100 MB | For dependencies + SQLite database |
+| **Network** | Outbound HTTPS (443) | To cloud APIs and optional LLM endpoint |
+
+#### Python 3.11+
+
+Check your version first:
 
 ```bash
 python3 --version
@@ -75,10 +87,50 @@ python3 --version
 If you're on Python 3.10 or older (common on Ubuntu 22.04), install 3.11 first:
 
 ```bash
+# Ubuntu / Debian
 sudo apt update
-sudo apt install python3.11 python3.11-venv -y
+sudo apt install python3.11 python3.11-venv python3.11-dev -y
+
+# macOS (Homebrew)
+brew install python@3.11
+
+# Verify
 python3.11 --version   # should print 3.11.x
 ```
+
+#### Cloud CLI tools (recommended, not required)
+
+These CLI tools simplify authentication setup but are not strictly required — you can use explicit credentials instead.
+
+| Cloud | CLI Tool | Install |
+|-------|----------|---------|
+| AWS | `aws` CLI v2 | `curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip && unzip awscliv2.zip && sudo ./aws/install` |
+| GCP | `gcloud` CLI | `curl https://sdk.cloud.google.com \| bash` |
+| Azure | `az` CLI | `curl -sL https://aka.ms/InstallAzureCLIDeb \| sudo bash` |
+| OCI | `oci` CLI | `pip install oci-cli` |
+
+#### Cloud-specific prerequisites
+
+**AWS:**
+- An AWS account with Cost Explorer enabled (on by default)
+- IAM user/role with `ReadOnlyAccess` or the [minimal custom policy](#required-permissions) below
+- For RI/Savings Plan tracking: `ce:GetSavingsPlansUtilization` and `ec2:DescribeReservedInstances` permissions
+
+**GCP:**
+- A GCP project with billing enabled
+- BigQuery billing export configured (see [GCP Setup](#gcp-setup)) — required for cost data
+- APIs enabled: Compute Engine, Container, BigQuery, Cloud Billing, Cloud SQL Admin, Cloud Storage, Cloud Run, Cloud Functions, Pub/Sub
+- IAM roles: `roles/viewer`, `roles/bigquery.dataViewer`, `roles/bigquery.jobUser`
+
+**Azure:**
+- An Azure subscription
+- `Reader` + `Cost Management Reader` roles assigned to the principal
+- Resource providers registered: `Microsoft.Compute`, `Microsoft.ContainerService`, `Microsoft.CostManagement`, `Microsoft.Network`, `Microsoft.Storage`, `Microsoft.Web`, `Microsoft.Sql`, `Microsoft.DocumentDB`, `Microsoft.Cdn`
+
+**OCI:**
+- An OCI tenancy with a compartment to scan
+- IAM policy: `Allow group finops-readers to read all-resources in tenancy`
+- For cost data: `Allow group finops-readers to read usage-reports in tenancy`
 
 ### 1. Install
 
@@ -118,9 +170,10 @@ source ~/.venvs/finops/bin/activate
 For cloud-specific dependencies:
 
 ```bash
-pip install ".[gcp]"     # GCP support
-pip install ".[azure]"   # Azure support
-pip install ".[oci]"     # OCI support
+pip install ".[gcp]"     # GCP support (Compute, GKE, Cloud SQL, GCS, Cloud Run, Functions, BigQuery, Pub/Sub)
+pip install ".[azure]"   # Azure support (VMs, AKS, SQL DB, Cosmos DB, CDN, Functions, VPN)
+pip install ".[oci]"     # OCI support (Compute, OKE, Autonomous DB, Object Storage)
+pip install ".[gcp,azure,oci]"  # All clouds at once
 ```
 
 For development (linting, type checking, tests):
@@ -219,16 +272,25 @@ Or use this minimal custom policy covering exactly what the agent calls:
         "sts:GetCallerIdentity",
         "ce:GetCostAndUsage",
         "ce:GetCostForecast",
+        "ce:GetSavingsPlansUtilization",
         "ec2:DescribeInstances",
         "ec2:DescribeVolumes",
         "ec2:DescribeNatGateways",
         "ec2:DescribeAddresses",
+        "ec2:DescribeVpnConnections",
+        "ec2:DescribeReservedInstances",
         "elasticloadbalancing:DescribeLoadBalancers",
         "elasticloadbalancing:DescribeTargetGroups",
         "eks:ListClusters",
         "eks:DescribeCluster",
         "eks:ListNodegroups",
-        "eks:DescribeNodegroup"
+        "eks:DescribeNodegroup",
+        "rds:DescribeDBInstances",
+        "s3:ListAllMyBuckets",
+        "s3:GetBucketLocation",
+        "lambda:ListFunctions",
+        "cloudfront:ListDistributions",
+        "apigateway:GET"
       ],
       "Resource": "*"
     }
@@ -294,13 +356,16 @@ credentials are not configured correctly — re-run `aws configure`.
 
 ```
 AWS Cost Explorer API
-  └─ GetCostAndUsage (daily, grouped by SERVICE + REGION)
-       └─ CostSnapshot (per service/region/day)
-            └─ SQLite cost_snapshots table
-                 └─ intelligence engine (anomaly, forecast, contributors)
+  ├─ GetCostAndUsage (daily, grouped by SERVICE + REGION)
+  │    └─ CostSnapshot (per service/region/day)
+  ├─ GetSavingsPlansUtilization
+  │    └─ SavingsPlanSnapshot (utilization %)
+  └─ DescribeReservedInstances
+       └─ SavingsPlanSnapshot (per RI)
+            └─ SQLite savings_plan_snapshots table
 
-EC2 / EBS / ELB / NAT / EKS Describe* APIs
-  └─ ResourceSnapshot (per resource, with state + metadata)
+EC2 / EBS / ELB / NAT / EKS / RDS / S3 / Lambda / VPN / CloudFront / API Gateway
+  └─ ResourceSnapshot (per resource, with state + cost estimate)
        └─ SQLite resource_snapshots table
             └─ intelligence engine (waste detection)
 ```
@@ -356,6 +421,11 @@ gcloud services enable compute.googleapis.com
 gcloud services enable container.googleapis.com
 gcloud services enable bigquery.googleapis.com
 gcloud services enable cloudbilling.googleapis.com
+gcloud services enable sqladmin.googleapis.com
+gcloud services enable storage.googleapis.com
+gcloud services enable run.googleapis.com
+gcloud services enable cloudfunctions.googleapis.com
+gcloud services enable pubsub.googleapis.com
 ```
 
 Or enable them in the GCP Console under **APIs & Services → Library**.
@@ -447,11 +517,10 @@ BigQuery billing export table
             └─ SQLite cost_snapshots table
                  └─ intelligence engine (anomaly, forecast, contributors)
 
-Compute Engine aggregatedList APIs (instances, disks, forwarding rules)
-Container API listClusters
-  └─ ResourceSnapshot (per resource, with state + metadata)
+Compute Engine / GKE / Cloud SQL / GCS / Cloud Run / Functions / BigQuery / Pub/Sub
+  └─ ResourceSnapshot (per resource, with state + cost estimate)
        └─ SQLite resource_snapshots table
-            └─ intelligence engine (waste detection: unattached disks, stopped VMs)
+            └─ intelligence engine (waste detection)
 ```
 
 ---
@@ -505,6 +574,9 @@ az provider register --namespace Microsoft.CostManagement
 az provider register --namespace Microsoft.Network
 az provider register --namespace Microsoft.Storage
 az provider register --namespace Microsoft.Web
+az provider register --namespace Microsoft.Sql
+az provider register --namespace Microsoft.DocumentDB
+az provider register --namespace Microsoft.Cdn
 ```
 
 ### How Azure data flows
@@ -516,8 +588,8 @@ Azure Cost Management API
             └─ SQLite cost_snapshots table
                  └─ intelligence engine (anomaly, forecast, contributors)
 
-Compute / Network / ContainerService / Storage / Web management APIs
-  └─ ResourceSnapshot (per resource, with state + metadata)
+Compute / Network / ContainerService / Storage / Web / SQL / CosmosDB / CDN mgmt APIs
+  └─ ResourceSnapshot (per resource, with state + cost estimate)
        └─ SQLite resource_snapshots table
             └─ intelligence engine (waste detection)
 ```
@@ -544,6 +616,9 @@ Allow group finops-readers to read volume-attachments in tenancy
 Allow group finops-readers to read load-balancers in tenancy
 Allow group finops-readers to read clusters in tenancy
 Allow group finops-readers to read node-pools in tenancy
+Allow group finops-readers to read autonomous-databases in tenancy
+Allow group finops-readers to read buckets in tenancy
+Allow group finops-readers to read objectstorage-namespaces in tenancy
 Allow group finops-readers to read usage-reports in tenancy
 ```
 
@@ -580,8 +655,8 @@ OCI Usage API (UsageapiClient)
             └─ SQLite cost_snapshots table
                  └─ intelligence engine (anomaly, forecast, contributors)
 
-Core / BlockStorage / LoadBalancer / ContainerEngine APIs
-  └─ ResourceSnapshot (per resource, with state + metadata)
+Core / BlockStorage / LoadBalancer / ContainerEngine / Database / ObjectStorage APIs
+  └─ ResourceSnapshot (per resource, with state + cost estimate)
        └─ SQLite resource_snapshots table
             └─ intelligence engine (waste detection)
 ```
@@ -680,7 +755,7 @@ finops config set llm.api_key ollama
 | `finops explain-bill` | Full bill analysis with LLM-powered reasoning |
 | `finops explain-spike` | Detect cost anomalies and explain likely causes |
 | `finops top-cost` | Top 10 most expensive resources |
-| `finops find-waste` | Find unattached disks, stopped instances, idle NAT gateways |
+| `finops find-waste` | Find unattached disks, stopped instances/databases, idle NATs |
 | `finops forecast` | Monthly cost projection with trend analysis |
 | `finops config set` | Set a configuration value |
 | `finops config get` | Read a configuration value |
@@ -718,10 +793,12 @@ finops summary --output plain     # Plain text for piping / grep
 
 | Rule | Trigger | Estimated savings |
 |------|---------|------------------|
-| Unattached disk | EBS/PD with no attachments for > 24h | ~$0.08–$0.17/GB/month |
-| Stopped instance | EC2/VM stopped for > 7 days (EBS charges continue) | Varies |
+| Unattached disk | EBS/PD/ManagedDisk/BlockVolume with no attachments | ~$0.08–$0.17/GB/month |
+| Stopped instance | EC2/VM/GCE/Compute stopped (disk charges continue) | Varies |
 | Idle NAT Gateway | NAT with < 1GB transfer/day | ~$32.40/month each |
 | Unused Elastic IP | EIP not attached to a running instance | ~$3.60/month each |
+| Idle instance | EC2/VM/GCE/Compute with avg CPU < 5% over 14 days | Full instance cost |
+| Stopped database | RDS/AzureSQL/CloudSQL/AutonomousDB in stopped state | Storage charges continue |
 
 ### Forecasting
 
@@ -755,14 +832,14 @@ finops summary --output plain     # Plain text for piping / grep
      │  Cloud     │  └────────────┘
      │ Collectors │
      ├────────────┤
-     │ AWS Cost   │  ← Cost Explorer API
-     │ AWS Res.   │  ← EC2/EBS/ELB/NAT/EKS Describe*
+     │ AWS Cost   │  ← Cost Explorer + RI/Savings Plans
+     │ AWS Res.   │  ← EC2/EBS/RDS/S3/ELB/NAT/EKS/Lambda/VPN/CF/APIGW
      │ GCP Cost   │  ← BigQuery billing export
-     │ GCP Res.   │  ← Compute/Container aggregatedList
+     │ GCP Res.   │  ← Compute/GKE/CloudSQL/GCS/Run/Functions/BQ/PubSub
      │ Azure Cost │  ← Cost Management API
-     │ Azure Res. │  ← Compute/Network/Storage/Web mgmt APIs
+     │ Azure Res. │  ← Compute/Network/Storage/Web/SQL/Cosmos/CDN
      │ OCI Cost   │  ← Usage API
-     │ OCI Res.   │  ← Core/BlockStorage/LB/ContainerEngine
+     │ OCI Res.   │  ← Core/BlockStorage/LB/OKE/Database/ObjectStorage
      └────────────┘
 ```
 
@@ -789,21 +866,21 @@ finops-agent/
 │   ├── aws/
 │   │   ├── collector.py        # Unified AWS collector
 │   │   ├── cost_collector.py   # Cost Explorer API → CostSnapshot
-│   │   └── resource_collector.py  # EC2, EBS, ELB, NAT Gateway, EKS
+│   │   └── resource_collector.py  # EC2, EBS, RDS, S3, ELB, NAT, EKS, Lambda, VPN, CloudFront, API GW
 │   ├── gcp/
 │   │   ├── collector.py        # Unified GCP collector + credential loading
 │   │   ├── cost_collector.py   # BigQuery billing export → CostSnapshot
-│   │   └── resource_collector.py  # Compute VMs, Disks, LBs, GKE
+│   │   └── resource_collector.py  # Compute VMs, Disks, LBs, GKE, Cloud SQL, GCS, Run, Functions, BQ, Pub/Sub
 │   ├── azure/
 │   │   ├── collector.py        # Unified Azure collector + credential building
 │   │   ├── cost_collector.py   # Cost Management API → CostSnapshot
-│   │   └── resource_collector.py  # VMs, Managed Disks, LBs, AKS, Storage, App Service
+│   │   └── resource_collector.py  # VMs, Disks, LBs, AKS, Storage, App Service, SQL, Functions, VPN, CDN, Cosmos
 │   └── oci/
 │       ├── collector.py        # Unified OCI collector + config loading
 │       ├── cost_collector.py   # Usage API → CostSnapshot
-│       └── resource_collector.py  # Compute, Block Volumes, LBs, OKE
+│       └── resource_collector.py  # Compute, Block Volumes, LBs, OKE, Autonomous DB, Object Storage
 ├── cost_model/
-│   └── models.py               # ResourceSnapshot, CostSnapshot, AnomalyEvent
+│   └── models.py               # ResourceSnapshot, CostSnapshot, SavingsPlanSnapshot, AnomalyEvent
 ├── intelligence/
 │   ├── anomaly.py              # Cost spikes, high-cost resources, scaling events
 │   ├── waste.py                # Unattached disks, stopped instances, idle NATs
@@ -999,19 +1076,21 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting and the full security
 
 ## Roadmap
 
-- [x] AWS Cost Explorer integration
-- [x] AWS resource collection (EC2, EBS, ELB, NAT Gateway, EKS)
+- [x] AWS Cost Explorer integration + Reserved Instance / Savings Plan tracking
+- [x] AWS resource collection (EC2, EBS, RDS, S3, ELB, NAT Gateway, EKS, Lambda, VPN, CloudFront, API Gateway)
+- [x] AWS resource cost estimation (pricing tables for EC2, EBS, ELB, NAT, EKS, RDS)
 - [x] GCP BigQuery billing export integration
-- [x] GCP resource collection (Compute VMs, Persistent Disks, Load Balancers, GKE)
+- [x] GCP resource collection (Compute VMs, Persistent Disks, LBs, GKE, Cloud SQL, GCS, Cloud Run, Cloud Functions, BigQuery, Pub/Sub)
+- [x] Azure Cost Management + resource collection (VMs, Disks, LBs, AKS, Storage, App Service, SQL DB, Function Apps, VPN Gateways, CDN, Cosmos DB)
+- [x] OCI Usage API + resource collection (Compute, Block Volumes, LBs, OKE, Autonomous DB, Object Storage)
 - [x] Anomaly detection engine (cost spikes, new high-cost resources, scaling events)
-- [x] Waste detection engine (unattached disks, stopped instances, idle NATs, unused EIPs)
+- [x] Waste detection engine (unattached disks, stopped instances, stopped databases, idle NATs, unused EIPs)
 - [x] Cost forecasting (linear regression + trend)
 - [x] LLM-powered explanations (OpenAI, Anthropic, Amazon Bedrock, Groq, Gemini, Ollama)
 - [x] CLI with table/JSON/plain output
-- [x] Azure Cost Management + resource collection (VMs, Disks, LBs, AKS, Storage, App Service)
-- [x] OCI Usage API + resource collection (Compute, Block Volumes, LBs, OKE)
 - [x] Docker image with multi-stage build (all cloud providers included)
-- [ ] CloudWatch/Cloud Monitoring integration for CPU-based waste detection
+- [x] CloudWatch/Cloud Monitoring integration for CPU-based idle instance detection (AWS, Azure, GCP, OCI)
+- [x] Dynamic pricing API integration (AWS Pricing API, Azure Retail Prices, GCP Cloud Billing Catalog) with in-memory cache and hardcoded fallback
 - [ ] Scheduler daemon mode (`finops-agent run --mode daemon`)
 - [ ] Kubernetes CronJob deployment
 - [ ] Helm chart

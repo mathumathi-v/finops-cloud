@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from cost_model.models import ResourceSnapshot
-from intelligence.constants import STOPPED_INSTANCE_DAYS
+from intelligence.constants import IDLE_CPU_LOOKBACK_DAYS, IDLE_CPU_PERCENT_THRESHOLD, STOPPED_INSTANCE_DAYS
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,8 @@ class WasteFinding:
 
 _DISK_SERVICES = {"EBS", "PersistentDisk", "ManagedDisk", "BlockVolume"}
 _COMPUTE_SERVICES = {"EC2", "GCE", "VirtualMachine", "Compute"}
+_DATABASE_SERVICES = {"RDS", "AzureSQL", "CloudSQL", "AutonomousDB", "CosmosDB"}
+_SERVERLESS_SERVICES = {"Lambda", "FunctionApp", "CloudRun", "CloudFunctions"}
 
 
 def detect_unattached_disks(resources: list[ResourceSnapshot]) -> list[WasteFinding]:
@@ -172,6 +174,85 @@ def detect_unused_elastic_ips(resources: list[ResourceSnapshot]) -> list[WasteFi
     return findings
 
 
+def detect_idle_instances(resources: list[ResourceSnapshot]) -> list[WasteFinding]:
+    """Find running compute instances with very low CPU utilization.
+
+    Requires ``metadata["avg_cpu_percent"]`` to be populated by the
+    provider's ``collect_cpu_metrics()`` method.  Resources without
+    this key are silently skipped.
+    """
+    findings: list[WasteFinding] = []
+    for r in resources:
+        if r.service not in _COMPUTE_SERVICES or r.state != "running":
+            continue
+        avg_cpu = r.metadata.get("avg_cpu_percent")
+        if avg_cpu is None:
+            continue
+        try:
+            cpu_val = float(avg_cpu)
+        except (TypeError, ValueError):
+            continue
+        if cpu_val < IDLE_CPU_PERCENT_THRESHOLD:
+            findings.append(
+                WasteFinding(
+                    resource_id=r.resource_id,
+                    provider=r.provider,
+                    account_id=r.account_id,
+                    service=r.service,
+                    region=r.region,
+                    name=r.name,
+                    waste_type="idle_instance",
+                    description=(
+                        f"{r.service} instance {r.name or r.resource_id} has average CPU "
+                        f"utilization of {cpu_val:.1f}% over the last "
+                        f"{IDLE_CPU_LOOKBACK_DAYS} days. Consider downsizing or terminating."
+                    ),
+                    estimated_monthly_savings=r.monthly_cost_estimate,
+                    metadata={
+                        "avg_cpu_percent": cpu_val,
+                        "lookback_days": IDLE_CPU_LOOKBACK_DAYS,
+                        "instance_type": (
+                            r.metadata.get("instance_type")
+                            or r.metadata.get("machine_type")
+                            or r.metadata.get("vm_size")
+                        ),
+                    },
+                )
+            )
+
+    logger.info("Found %d idle instance(s) (CPU < %.1f%%)", len(findings), IDLE_CPU_PERCENT_THRESHOLD)
+    return findings
+
+
+def detect_idle_databases(resources: list[ResourceSnapshot]) -> list[WasteFinding]:
+    """Find database instances that are stopped or have very low activity."""
+    findings: list[WasteFinding] = []
+    for r in resources:
+        if r.service in _DATABASE_SERVICES and r.state == "stopped":
+            findings.append(
+                WasteFinding(
+                    resource_id=r.resource_id,
+                    provider=r.provider,
+                    account_id=r.account_id,
+                    service=r.service,
+                    region=r.region,
+                    name=r.name,
+                    waste_type="stopped_database",
+                    description=(
+                        f"{r.service} database {r.name or r.resource_id} is stopped. "
+                        f"Stopped databases may still incur storage charges. "
+                        f"Consider deleting if no longer needed."
+                    ),
+                    estimated_monthly_savings=r.monthly_cost_estimate,
+                    metadata={
+                        "engine": r.metadata.get("engine") or r.metadata.get("database_version", ""),
+                    },
+                )
+            )
+    logger.info("Found %d idle database(s)", len(findings))
+    return findings
+
+
 def find_all_waste(resources: list[ResourceSnapshot]) -> list[WasteFinding]:
     """Run all waste detection rules and return combined findings."""
     findings: list[WasteFinding] = []
@@ -179,4 +260,6 @@ def find_all_waste(resources: list[ResourceSnapshot]) -> list[WasteFinding]:
     findings.extend(detect_stopped_instances(resources))
     findings.extend(detect_idle_nat_gateways(resources))
     findings.extend(detect_unused_elastic_ips(resources))
+    findings.extend(detect_idle_instances(resources))
+    findings.extend(detect_idle_databases(resources))
     return findings

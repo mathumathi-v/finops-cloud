@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "finops-agent"
-version = "0.3.2"
+version = "0.4.0"
 description = "Open-source, CLI-first, multi-cloud infrastructure cost reasoning agent"
 readme = "README.md"
 license = "Apache-2.0"
@@ -34,6 +34,13 @@ gcp = [
     "google-cloud-bigquery >= 3.11",
     "google-cloud-compute >= 1.14",
     "google-cloud-container >= 2.21",
+    "google-cloud-storage >= 2.14",
+    "google-cloud-run >= 0.10",
+    "google-cloud-functions >= 1.16",
+    "google-cloud-pubsub >= 2.19",
+    "google-cloud-monitoring >= 2.16",
+    "google-cloud-billing >= 1.11",
+    "google-api-python-client >= 2.100",
     "google-auth >= 2.0",
 ]
 azure = [
@@ -45,6 +52,11 @@ azure = [
     "azure-mgmt-resource >= 23.0",
     "azure-mgmt-storage >= 21.0",
     "azure-mgmt-web >= 7.0",
+    "azure-mgmt-sql >= 3.0",
+    "azure-mgmt-cosmosdb >= 9.0",
+    "azure-mgmt-cdn >= 13.0",
+    "azure-mgmt-monitor >= 6.0",
+    "cffi >= 1.15",
 ]
 oci = [
     "oci >= 2.120",
