@@ -12,6 +12,7 @@ from intelligence.anomaly import (
 from intelligence.contributors import top_regions, top_resources, top_services
 from intelligence.forecast import compute_forecast
 from intelligence.waste import (
+    detect_idle_instances,
     detect_idle_nat_gateways,
     detect_stopped_instances,
     detect_unattached_disks,
@@ -217,6 +218,81 @@ class TestWasteDetection:
         ]
         findings = find_all_waste(resources)
         assert len(findings) == 0
+
+
+class TestIdleInstanceDetection:
+    def test_detects_idle_instance(self) -> None:
+        resources = [
+            ResourceSnapshot(
+                resource_id="i-idle", provider="aws", account_id="a",
+                type="compute", service="EC2", name="idle-box", region="us-east-1",
+                daily_cost=2.0, monthly_cost_estimate=60.0, currency="USD",
+                state="running",
+                metadata={"instance_type": "t3.medium", "avg_cpu_percent": 2.0},
+                snapshot_time=datetime.now(UTC),
+            ),
+        ]
+        findings = detect_idle_instances(resources)
+        assert len(findings) == 1
+        assert findings[0].waste_type == "idle_instance"
+        assert findings[0].estimated_monthly_savings == 60.0
+
+    def test_ignores_busy_instance(self) -> None:
+        resources = [
+            ResourceSnapshot(
+                resource_id="i-busy", provider="aws", account_id="a",
+                type="compute", service="EC2", name="busy-box", region="us-east-1",
+                daily_cost=2.0, monthly_cost_estimate=60.0, currency="USD",
+                state="running",
+                metadata={"instance_type": "m5.large", "avg_cpu_percent": 45.0},
+                snapshot_time=datetime.now(UTC),
+            ),
+        ]
+        findings = detect_idle_instances(resources)
+        assert len(findings) == 0
+
+    def test_ignores_instance_without_metrics(self) -> None:
+        resources = [
+            ResourceSnapshot(
+                resource_id="i-nometrics", provider="aws", account_id="a",
+                type="compute", service="EC2", name="no-metrics", region="us-east-1",
+                daily_cost=2.0, monthly_cost_estimate=60.0, currency="USD",
+                state="running",
+                metadata={"instance_type": "t3.medium"},
+                snapshot_time=datetime.now(UTC),
+            ),
+        ]
+        findings = detect_idle_instances(resources)
+        assert len(findings) == 0
+
+    def test_ignores_stopped_instance(self) -> None:
+        resources = [
+            ResourceSnapshot(
+                resource_id="i-stopped", provider="aws", account_id="a",
+                type="compute", service="EC2", name="", region="us-east-1",
+                daily_cost=0.0, monthly_cost_estimate=0.0, currency="USD",
+                state="stopped",
+                metadata={"instance_type": "t3.medium", "avg_cpu_percent": 0.0},
+                snapshot_time=datetime.now(UTC),
+            ),
+        ]
+        findings = detect_idle_instances(resources)
+        assert len(findings) == 0
+
+    def test_find_all_waste_includes_idle(self) -> None:
+        resources = [
+            ResourceSnapshot(
+                resource_id="i-idle", provider="aws", account_id="a",
+                type="compute", service="EC2", name="idle", region="us-east-1",
+                daily_cost=2.0, monthly_cost_estimate=60.0, currency="USD",
+                state="running",
+                metadata={"instance_type": "t3.medium", "avg_cpu_percent": 1.5},
+                snapshot_time=datetime.now(UTC),
+            ),
+        ]
+        findings = find_all_waste(resources)
+        types = {f.waste_type for f in findings}
+        assert "idle_instance" in types
 
 
 # -- Forecast -----------------------------------------------------------------

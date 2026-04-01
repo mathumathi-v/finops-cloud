@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from cost_model.models import ResourceSnapshot
+from intelligence.constants import IDLE_CPU_LOOKBACK_DAYS
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,15 @@ _OKE_HOURLY_USD: dict[str, float] = {
     "enhanced": 0.10,
 }
 
+# Autonomous DB OCPU hourly USD (us-ashburn-1).
+_ADB_OCPU_HOURLY_USD: dict[str, float] = {
+    "license_included": 3.3606,
+    "bring_your_own_license": 1.3441,
+}
+
+# Autonomous DB storage per-TB per-month USD.
+_ADB_STORAGE_TB_MONTH_USD = 118.40
+
 _HOURS_PER_DAY = 24.0
 _DAYS_PER_MONTH = 30.0
 
@@ -119,8 +129,21 @@ def _daily_cost_for_oke(cluster_type: str) -> float:
     return round(hourly * _HOURS_PER_DAY, 4)
 
 
+def _daily_cost_for_autonomous_db(
+    ocpus: float, storage_tbs: float, license_model: str, is_free_tier: bool,
+) -> float:
+    """Estimate daily cost for an Autonomous Database."""
+    if is_free_tier:
+        return 0.0
+    key = "bring_your_own_license" if "byol" in license_model.lower() else "license_included"
+    hourly = _ADB_OCPU_HOURLY_USD.get(key, 1.3441)
+    compute_daily = hourly * ocpus * _HOURS_PER_DAY
+    storage_daily = storage_tbs * _ADB_STORAGE_TB_MONTH_USD / _DAYS_PER_MONTH
+    return round(compute_daily + storage_daily, 6)
+
+
 class OCIResourceCollector:
-    """Fetches live OCI resource metadata (Compute, Block Volumes, LBs, OKE)."""
+    """Fetches live OCI resource metadata."""
 
     def __init__(self, compartment_id: str, config: object) -> None:
         """
@@ -141,6 +164,8 @@ class OCIResourceCollector:
             ("Block Volumes", self._collect_block_volumes),
             ("Load Balancers", self._collect_load_balancers),
             ("OKE clusters", self._collect_oke),
+            ("Autonomous Databases", self._collect_autonomous_db),
+            ("Object Storage", self._collect_object_storage),
         ]
         for name, fn in collectors:
             try:
@@ -461,6 +486,170 @@ class OCIResourceCollector:
                         },
                         snapshot_time=self._snapshot_time,
                     )
+                )
+
+        return snapshots
+
+    # ------------------------------------------------------------------
+    # Autonomous Databases
+    # ------------------------------------------------------------------
+
+    def _collect_autonomous_db(self) -> list[ResourceSnapshot]:
+        """List all Autonomous Databases in the compartment."""
+        try:
+            import oci  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise ImportError(
+                "oci SDK is required. Install it with: pip install oci"
+            ) from exc
+
+        client = oci.database.DatabaseClient(self._config)
+        snapshots: list[ResourceSnapshot] = []
+
+        adbs = oci.pagination.list_call_get_all_results(
+            client.list_autonomous_databases,
+            compartment_id=self._compartment_id,
+        ).data
+
+        for adb in adbs:
+            if adb.lifecycle_state == "TERMINATED":
+                continue
+
+            ocpus = float(adb.cpu_core_count or 0)
+            storage_tbs = float(adb.data_storage_size_in_tbs or 0)
+            is_free = bool(adb.is_free_tier)
+            license_model = adb.license_model or "LICENSE_INCLUDED"
+            state = adb.lifecycle_state.lower() if adb.lifecycle_state else "unknown"
+            tags: dict[str, str] = dict(adb.freeform_tags or {})
+
+            daily = _daily_cost_for_autonomous_db(
+                ocpus, storage_tbs, license_model, is_free,
+            ) if state == "available" else 0.0
+
+            snapshots.append(
+                ResourceSnapshot(
+                    resource_id=adb.id,
+                    provider="oci",
+                    account_id=self._compartment_id,
+                    type="database",
+                    service="AutonomousDB",
+                    name=adb.display_name or "",
+                    region="",
+                    daily_cost=daily,
+                    monthly_cost_estimate=round(daily * _DAYS_PER_MONTH, 4),
+                    currency="USD",
+                    state=state,
+                    tags=tags,
+                    metadata={
+                        "db_workload": adb.db_workload or "",
+                        "cpu_core_count": ocpus,
+                        "data_storage_size_in_tbs": storage_tbs,
+                        "is_free_tier": is_free,
+                        "db_version": adb.db_version or "",
+                        "license_model": license_model,
+                    },
+                    snapshot_time=self._snapshot_time,
+                )
+            )
+
+        return snapshots
+
+    # ------------------------------------------------------------------
+    # Object Storage
+    # ------------------------------------------------------------------
+
+    def _collect_object_storage(self) -> list[ResourceSnapshot]:
+        """List all Object Storage buckets in the compartment."""
+        try:
+            import oci  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise ImportError(
+                "oci SDK is required. Install it with: pip install oci"
+            ) from exc
+
+        client = oci.object_storage.ObjectStorageClient(self._config)
+        namespace = client.get_namespace().data
+        snapshots: list[ResourceSnapshot] = []
+
+        buckets = oci.pagination.list_call_get_all_results(
+            client.list_buckets,
+            namespace_name=namespace,
+            compartment_id=self._compartment_id,
+        ).data
+
+        for bucket in buckets:
+            tags: dict[str, str] = dict(bucket.freeform_tags or {})
+            snapshots.append(
+                ResourceSnapshot(
+                    resource_id=f"{namespace}/{bucket.name}",
+                    provider="oci",
+                    account_id=self._compartment_id,
+                    type="storage",
+                    service="ObjectStorage",
+                    name=bucket.name or "",
+                    region="",
+                    daily_cost=0.0,  # size-dependent; use Usage API
+                    monthly_cost_estimate=0.0,
+                    currency="USD",
+                    state="active",
+                    tags=tags,
+                    metadata={
+                        "namespace": namespace,
+                        "storage_tier": bucket.storage_tier or "Standard",
+                        "time_created": str(bucket.time_created or ""),
+                    },
+                    snapshot_time=self._snapshot_time,
+                )
+            )
+
+        return snapshots
+
+    # ------------------------------------------------------------------
+    # CPU Metrics (OCI Monitoring)
+    # ------------------------------------------------------------------
+
+    def collect_cpu_metrics(self, snapshots: list[ResourceSnapshot]) -> list[ResourceSnapshot]:
+        """Enrich running instances with average CPU utilization from OCI Monitoring."""
+        try:
+            import oci  # type: ignore[import-untyped]
+        except ImportError:
+            logger.debug("oci SDK not available, skipping CPU metrics")
+            return snapshots
+
+        try:
+            monitoring = oci.monitoring.MonitoringClient(self._config)
+        except Exception:
+            logger.warning("Could not create OCI Monitoring client", exc_info=True)
+            return snapshots
+
+        now = datetime.now(UTC)
+        start = now - timedelta(days=IDLE_CPU_LOOKBACK_DAYS)
+
+        for snap in snapshots:
+            if snap.service != "Compute" or snap.state != "running":
+                continue
+            try:
+                resp = monitoring.summarize_metrics_data(
+                    compartment_id=self._compartment_id,
+                    summarize_metrics_data_details=oci.monitoring.models.SummarizeMetricsDataDetails(
+                        namespace="oci_computeagent",
+                        query=f'CpuUtilization[1d]{{resourceId = "{snap.resource_id}"}}.mean()',
+                        start_time=start.isoformat(),
+                        end_time=now.isoformat(),
+                    ),
+                )
+                values: list[float] = []
+                for ts in resp.data:
+                    for dp in ts.aggregated_datapoints:
+                        if dp.value is not None:
+                            values.append(float(dp.value))
+                if values:
+                    snap.metadata["avg_cpu_percent"] = round(
+                        sum(values) / len(values), 2,
+                    )
+            except Exception:
+                logger.debug(
+                    "OCI Monitoring CPU lookup failed for %s", snap.resource_id, exc_info=True,
                 )
 
         return snapshots

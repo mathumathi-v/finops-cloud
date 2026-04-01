@@ -334,6 +334,77 @@ class TestGCPResourceCollectorDisks:
 # ---------------------------------------------------------------------------
 
 
+class TestGCPCloudSQLHelpers:
+    def test_daily_cost_for_cloud_sql(self) -> None:
+        from cloud.gcp.resource_collector import _daily_cost_for_cloud_sql
+
+        cost = _daily_cost_for_cloud_sql("db-n1-standard-1", 100, "PD_SSD")
+        expected = 0.0965 * 24 + 100 * 0.17 / 30
+        assert cost == pytest.approx(expected, rel=1e-4)
+
+    def test_daily_cost_for_cloud_sql_hdd(self) -> None:
+        from cloud.gcp.resource_collector import _daily_cost_for_cloud_sql
+
+        cost = _daily_cost_for_cloud_sql("db-f1-micro", 50, "PD_HDD")
+        expected = 0.0150 * 24 + 50 * 0.09 / 30
+        assert cost == pytest.approx(expected, rel=1e-4)
+
+    def test_daily_cost_for_cloud_sql_unknown_tier(self) -> None:
+        from cloud.gcp.resource_collector import _daily_cost_for_cloud_sql
+
+        cost = _daily_cost_for_cloud_sql("db-custom-99-999999", 10, "PD_SSD")
+        # Unknown tier = 0.0 compute + storage cost
+        assert cost == pytest.approx(10 * 0.17 / 30, rel=1e-4)
+
+
+class TestGCPResourceCollectorCloudSQL:
+    def _make_collector(self) -> Any:
+        from cloud.gcp.resource_collector import GCPResourceCollector
+
+        c = GCPResourceCollector.__new__(GCPResourceCollector)
+        c._project_id = "test-project"
+        c._credentials = None
+        c._snapshot_time = datetime(2025, 3, 1, tzinfo=UTC)
+        return c
+
+    def test_collect_cloud_sql(self) -> None:
+        collector = self._make_collector()
+
+        mock_service = MagicMock()
+        mock_instances = MagicMock()
+        mock_service.instances.return_value = mock_instances
+        mock_list = MagicMock()
+        mock_instances.list.return_value = mock_list
+        mock_list.execute.return_value = {
+            "items": [
+                {
+                    "selfLink": "https://sqladmin.googleapis.com/.../mydb",
+                    "name": "my-sql-instance",
+                    "state": "RUNNABLE",
+                    "region": "us-central1",
+                    "databaseVersion": "MYSQL_8_0",
+                    "settings": {
+                        "tier": "db-n1-standard-1",
+                        "dataDiskSizeGb": "100",
+                        "dataDiskType": "PD_SSD",
+                        "availabilityType": "REGIONAL",
+                        "userLabels": {"env": "prod"},
+                    },
+                }
+            ]
+        }
+
+        with patch("googleapiclient.discovery.build", return_value=mock_service):
+            snapshots = collector._collect_cloud_sql()
+
+        assert len(snapshots) == 1
+        s = snapshots[0]
+        assert s.type == "database"
+        assert s.service == "CloudSQL"
+        assert s.metadata["database_version"] == "MYSQL_8_0"
+        assert s.daily_cost > 0
+
+
 class TestGCPCollector:
     def test_test_connection_success(self) -> None:
         from cloud.gcp.collector import GCPCollector

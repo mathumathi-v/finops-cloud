@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
+from cloud.pricing import PricingProvider
 from cost_model.models import ResourceSnapshot
+from intelligence.constants import IDLE_CPU_LOOKBACK_DAYS
 
 logger = logging.getLogger(__name__)
 
@@ -162,15 +164,42 @@ _DISK_PRICE_PER_GB_MONTH: dict[str, float] = {
     "standardssd_zrs": 0.09,
 }
 
+# Azure SQL DTU-based daily USD (East US).
+_SQL_DTU_DAILY_USD: dict[str, float] = {
+    "basic": 0.1667,
+    "s0": 0.4833, "s1": 0.967, "s2": 1.934, "s3": 3.867,
+    "s4": 7.734, "s6": 15.468, "s7": 30.936, "s9": 61.872, "s12": 123.744,
+    "p1": 15.0, "p2": 30.0, "p4": 60.0, "p6": 120.0, "p11": 240.0, "p15": 320.0,
+}
+
+# Azure SQL vCore-based hourly USD (General Purpose, East US).
+_SQL_VCORE_HOURLY_USD: dict[str, float] = {
+    "gp_gen5_2": 0.2084, "gp_gen5_4": 0.4168, "gp_gen5_8": 0.8336,
+    "gp_gen5_16": 1.6672, "gp_gen5_32": 3.3344,
+    "bc_gen5_2": 0.5002, "bc_gen5_4": 1.0004, "bc_gen5_8": 2.0008,
+}
+
+# VPN Gateway SKU hourly USD (East US).
+_VPN_GATEWAY_HOURLY_USD: dict[str, float] = {
+    "vpngw1": 0.19, "vpngw2": 0.49, "vpngw3": 1.25, "vpngw4": 1.60, "vpngw5": 3.22,
+    "vpngw1az": 0.19, "vpngw2az": 0.49, "vpngw3az": 1.25,
+    "basic": 0.04,
+}
+
+# Cosmos DB RU-based daily cost (East US) — per 100 RU/s.
+_COSMOS_HOURLY_PER_100RU = 0.008
+
 _HOURS_PER_DAY = 24.0
 _DAYS_PER_MONTH = 30.0
 
 
-def _daily_cost_for_vm(vm_size: str, power_state: str) -> float:
+def _daily_cost_for_vm(
+    vm_size: str, power_state: str, hourly_override: float | None = None,
+) -> float:
     """Estimate daily cost for a VM from its size and power state."""
     if "deallocated" in power_state.lower() or "stopped" in power_state.lower():
         return 0.0
-    hourly = _VM_HOURLY_USD.get(vm_size.lower(), 0.0)
+    hourly = hourly_override if hourly_override is not None else _VM_HOURLY_USD.get(vm_size.lower(), 0.0)
     return round(hourly * _HOURS_PER_DAY, 6)
 
 
@@ -198,6 +227,23 @@ def _daily_cost_for_app_service_plan(sku_name: str) -> float:
     return _APP_SERVICE_PLAN_DAILY_USD.get(sku_name.lower(), 0.0)
 
 
+def _daily_cost_for_sql_db(sku_name: str) -> float:
+    """Estimate daily cost for an Azure SQL Database from its SKU."""
+    key = sku_name.lower()
+    # Check DTU-based first
+    if key in _SQL_DTU_DAILY_USD:
+        return _SQL_DTU_DAILY_USD[key]
+    # Check vCore-based
+    hourly = _SQL_VCORE_HOURLY_USD.get(key, 0.0)
+    return round(hourly * _HOURS_PER_DAY, 4)
+
+
+def _daily_cost_for_vpn_gateway(sku: str) -> float:
+    """Estimate daily cost for a VPN Gateway from its SKU."""
+    hourly = _VPN_GATEWAY_HOURLY_USD.get(sku.lower(), 0.0)
+    return round(hourly * _HOURS_PER_DAY, 4)
+
+
 def _parse_resource_group(resource_id: str) -> str:
     """Extract resource group name from an Azure resource ID."""
     parts = resource_id.lower().split("/")
@@ -209,16 +255,23 @@ def _parse_resource_group(resource_id: str) -> str:
 
 
 class AzureResourceCollector:
-    """Fetches live Azure resource metadata (VMs, Disks, Load Balancers, AKS)."""
+    """Fetches live Azure resource metadata."""
 
-    def __init__(self, subscription_id: str, credential: object) -> None:
+    def __init__(
+        self,
+        subscription_id: str,
+        credential: object,
+        pricing_provider: PricingProvider | None = None,
+    ) -> None:
         """
         Args:
             subscription_id: Azure subscription ID.
             credential: An azure-identity credential object.
+            pricing_provider: Optional dynamic pricing provider.
         """
         self._subscription_id = subscription_id
         self._credential = credential
+        self._pricing = pricing_provider
         self._snapshot_time = datetime.now(UTC)
 
     def collect_resources(self) -> list[ResourceSnapshot]:
@@ -232,6 +285,11 @@ class AzureResourceCollector:
             ("AKS clusters", self._collect_aks),
             ("Storage Accounts", self._collect_storage_accounts),
             ("App Service Plans", self._collect_app_service_plans),
+            ("SQL Databases", self._collect_sql_databases),
+            ("Function Apps", self._collect_function_apps),
+            ("VPN Gateways", self._collect_vpn_gateways),
+            ("CDN Profiles", self._collect_cdn_profiles),
+            ("Cosmos DB Accounts", self._collect_cosmos_db),
         ]
         for name, fn in collectors:
             try:
@@ -633,5 +691,320 @@ class AzureResourceCollector:
                     snapshot_time=self._snapshot_time,
                 )
             )
+
+        return snapshots
+
+    # ------------------------------------------------------------------
+    # SQL Databases
+    # ------------------------------------------------------------------
+
+    def _collect_sql_databases(self) -> list[ResourceSnapshot]:
+        """List all Azure SQL Databases across all SQL servers."""
+        try:
+            from azure.mgmt.sql import SqlManagementClient  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise ImportError(
+                "azure-mgmt-sql is required. "
+                "Install it with: pip install azure-mgmt-sql"
+            ) from exc
+
+        client = SqlManagementClient(self._credential, self._subscription_id)  # type: ignore[arg-type]
+        snapshots: list[ResourceSnapshot] = []
+
+        for server in client.servers.list():
+            server_name = server.name or ""
+            rg = _parse_resource_group(server.id or "")
+            for db in client.databases.list_by_server(rg, server_name):
+                if (db.name or "").lower() == "master":
+                    continue
+                location = db.location or server.location or "unknown"
+                sku_name = db.sku.name if db.sku else ""
+                sku_tier = db.sku.tier if db.sku else ""
+                tags: dict[str, str] = dict(db.tags or {})
+
+                daily = _daily_cost_for_sql_db(sku_name)
+                snapshots.append(
+                    ResourceSnapshot(
+                        resource_id=db.id or db.name or "",
+                        provider="azure",
+                        account_id=self._subscription_id,
+                        type="database",
+                        service="AzureSQL",
+                        name=f"{server_name}/{db.name}",
+                        region=location,
+                        daily_cost=daily,
+                        monthly_cost_estimate=round(daily * _DAYS_PER_MONTH, 4),
+                        currency="USD",
+                        state=str(db.status or "unknown").lower(),
+                        tags=tags,
+                        metadata={
+                            "sku_name": sku_name,
+                            "sku_tier": sku_tier,
+                            "server_name": server_name,
+                            "resource_group": rg,
+                            "max_size_bytes": db.max_size_bytes or 0,
+                            "elastic_pool_id": db.elastic_pool_id or "",
+                        },
+                        snapshot_time=self._snapshot_time,
+                    )
+                )
+
+        return snapshots
+
+    # ------------------------------------------------------------------
+    # Function Apps (serverless)
+    # ------------------------------------------------------------------
+
+    def _collect_function_apps(self) -> list[ResourceSnapshot]:
+        """List all Function Apps in the subscription."""
+        try:
+            from azure.mgmt.web import WebSiteManagementClient  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise ImportError(
+                "azure-mgmt-web is required. "
+                "Install it with: pip install azure-mgmt-web"
+            ) from exc
+
+        client = WebSiteManagementClient(self._credential, self._subscription_id)  # type: ignore[arg-type]
+        snapshots: list[ResourceSnapshot] = []
+
+        for app in client.web_apps.list():
+            kind = str(app.kind or "").lower()
+            if "functionapp" not in kind:
+                continue
+
+            location = app.location or "unknown"
+            tags: dict[str, str] = dict(app.tags or {})
+            rg = _parse_resource_group(app.id or "")
+            state = str(app.state or "unknown").lower()
+
+            snapshots.append(
+                ResourceSnapshot(
+                    resource_id=app.id or app.name or "",
+                    provider="azure",
+                    account_id=self._subscription_id,
+                    type="serverless",
+                    service="FunctionApp",
+                    name=app.name or "",
+                    region=location,
+                    daily_cost=0.0,  # consumption plan is pay-per-invocation
+                    monthly_cost_estimate=0.0,
+                    currency="USD",
+                    state=state,
+                    tags=tags,
+                    metadata={
+                        "kind": kind,
+                        "resource_group": rg,
+                        "default_host_name": app.default_host_name or "",
+                        "https_only": bool(app.https_only),
+                    },
+                    snapshot_time=self._snapshot_time,
+                )
+            )
+
+        return snapshots
+
+    # ------------------------------------------------------------------
+    # VPN Gateways
+    # ------------------------------------------------------------------
+
+    def _collect_vpn_gateways(self) -> list[ResourceSnapshot]:
+        """List all VPN Gateways in the subscription."""
+        try:
+            from azure.mgmt.network import NetworkManagementClient  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise ImportError(
+                "azure-mgmt-network is required. "
+                "Install it with: pip install azure-mgmt-network"
+            ) from exc
+
+        client = NetworkManagementClient(self._credential, self._subscription_id)  # type: ignore[arg-type]
+        snapshots: list[ResourceSnapshot] = []
+
+        for gw in client.virtual_network_gateways.list_all():
+            location = gw.location or "unknown"
+            sku_name = gw.sku.name if gw.sku else ""
+            tags: dict[str, str] = dict(gw.tags or {})
+            rg = _parse_resource_group(gw.id or "")
+
+            daily = _daily_cost_for_vpn_gateway(sku_name)
+            snapshots.append(
+                ResourceSnapshot(
+                    resource_id=gw.id or gw.name or "",
+                    provider="azure",
+                    account_id=self._subscription_id,
+                    type="network",
+                    service="VPNGateway",
+                    name=gw.name or "",
+                    region=location,
+                    daily_cost=daily,
+                    monthly_cost_estimate=round(daily * _DAYS_PER_MONTH, 4),
+                    currency="USD",
+                    state="active",
+                    tags=tags,
+                    metadata={
+                        "sku": sku_name,
+                        "resource_group": rg,
+                        "gateway_type": str(gw.gateway_type or ""),
+                        "vpn_type": str(gw.vpn_type or ""),
+                    },
+                    snapshot_time=self._snapshot_time,
+                )
+            )
+
+        return snapshots
+
+    # ------------------------------------------------------------------
+    # CDN Profiles
+    # ------------------------------------------------------------------
+
+    def _collect_cdn_profiles(self) -> list[ResourceSnapshot]:
+        """List all CDN profiles in the subscription."""
+        try:
+            from azure.mgmt.cdn import CdnManagementClient  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise ImportError(
+                "azure-mgmt-cdn is required. "
+                "Install it with: pip install azure-mgmt-cdn"
+            ) from exc
+
+        client = CdnManagementClient(self._credential, self._subscription_id)  # type: ignore[arg-type]
+        snapshots: list[ResourceSnapshot] = []
+
+        for profile in client.profiles.list():
+            location = profile.location or "global"
+            sku_name = profile.sku.name if profile.sku else ""
+            tags: dict[str, str] = dict(profile.tags or {})
+            rg = _parse_resource_group(profile.id or "")
+
+            snapshots.append(
+                ResourceSnapshot(
+                    resource_id=profile.id or profile.name or "",
+                    provider="azure",
+                    account_id=self._subscription_id,
+                    type="network",
+                    service="CDN",
+                    name=profile.name or "",
+                    region=location,
+                    daily_cost=0.0,  # usage-based
+                    monthly_cost_estimate=0.0,
+                    currency="USD",
+                    state="active",
+                    tags=tags,
+                    metadata={
+                        "sku": sku_name,
+                        "resource_group": rg,
+                    },
+                    snapshot_time=self._snapshot_time,
+                )
+            )
+
+        return snapshots
+
+    # ------------------------------------------------------------------
+    # Cosmos DB Accounts
+    # ------------------------------------------------------------------
+
+    def _collect_cosmos_db(self) -> list[ResourceSnapshot]:
+        """List all Cosmos DB accounts in the subscription."""
+        try:
+            from azure.mgmt.cosmosdb import CosmosDBManagementClient  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise ImportError(
+                "azure-mgmt-cosmosdb is required. "
+                "Install it with: pip install azure-mgmt-cosmosdb"
+            ) from exc
+
+        client = CosmosDBManagementClient(self._credential, self._subscription_id)  # type: ignore[arg-type]
+        snapshots: list[ResourceSnapshot] = []
+
+        for account in client.database_accounts.list():
+            location = account.location or "unknown"
+            tags: dict[str, str] = dict(account.tags or {})
+            rg = _parse_resource_group(account.id or "")
+
+            # Cosmos DB cost depends on provisioned RU/s which requires
+            # additional API calls; set to 0.0 for inventory purposes.
+            snapshots.append(
+                ResourceSnapshot(
+                    resource_id=account.id or account.name or "",
+                    provider="azure",
+                    account_id=self._subscription_id,
+                    type="database",
+                    service="CosmosDB",
+                    name=account.name or "",
+                    region=location,
+                    daily_cost=0.0,
+                    monthly_cost_estimate=0.0,
+                    currency="USD",
+                    state="active",
+                    tags=tags,
+                    metadata={
+                        "kind": str(account.kind or ""),
+                        "resource_group": rg,
+                        "consistency_level": str(
+                            account.consistency_policy.default_consistency_level
+                            if account.consistency_policy else ""
+                        ),
+                        "enable_automatic_failover": bool(
+                            account.enable_automatic_failover
+                        ),
+                        "database_account_offer_type": str(
+                            account.database_account_offer_type or ""
+                        ),
+                    },
+                    snapshot_time=self._snapshot_time,
+                )
+            )
+
+        return snapshots
+
+    # ------------------------------------------------------------------
+    # CPU Metrics (Azure Monitor)
+    # ------------------------------------------------------------------
+
+    def collect_cpu_metrics(self, snapshots: list[ResourceSnapshot]) -> list[ResourceSnapshot]:
+        """Enrich running VMs with average CPU utilization from Azure Monitor."""
+        try:
+            from azure.mgmt.monitor import MonitorManagementClient  # type: ignore[import-untyped]
+        except ImportError:
+            logger.debug("azure-mgmt-monitor not installed, skipping CPU metrics")
+            return snapshots
+
+        try:
+            client = MonitorManagementClient(self._credential, self._subscription_id)  # type: ignore[arg-type]
+        except Exception:
+            logger.warning("Could not create Azure Monitor client", exc_info=True)
+            return snapshots
+
+        now = datetime.now(UTC)
+        start = now - timedelta(days=IDLE_CPU_LOOKBACK_DAYS)
+        timespan = f"{start.isoformat()}/{now.isoformat()}"
+
+        for snap in snapshots:
+            if snap.service != "VirtualMachine" or snap.state != "running":
+                continue
+            try:
+                result = client.metrics.list(
+                    resource_uri=snap.resource_id,
+                    timespan=timespan,
+                    interval="P1D",
+                    metricnames="Percentage CPU",
+                    aggregation="Average",
+                )
+                values: list[float] = []
+                for metric in result.value:
+                    for ts in metric.timeseries:
+                        for dp in ts.data:
+                            if dp.average is not None:
+                                values.append(dp.average)
+                if values:
+                    snap.metadata["avg_cpu_percent"] = round(
+                        sum(values) / len(values), 2,
+                    )
+            except Exception:
+                logger.debug(
+                    "Azure Monitor CPU lookup failed for %s", snap.resource_id, exc_info=True,
+                )
 
         return snapshots

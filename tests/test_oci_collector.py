@@ -502,6 +502,118 @@ class TestOCIResourceCollectorOKE:
 # ---------------------------------------------------------------------------
 
 
+class TestOCIAutonomousDBHelpers:
+    def test_daily_cost_license_included(self) -> None:
+        from cloud.oci.resource_collector import _daily_cost_for_autonomous_db
+
+        cost = _daily_cost_for_autonomous_db(2.0, 1.0, "LICENSE_INCLUDED", False)
+        expected = 3.3606 * 2.0 * 24 + 1.0 * 118.40 / 30
+        assert cost == pytest.approx(expected, rel=1e-4)
+
+    def test_daily_cost_byol(self) -> None:
+        from cloud.oci.resource_collector import _daily_cost_for_autonomous_db
+
+        cost = _daily_cost_for_autonomous_db(4.0, 2.0, "BYOL", False)
+        expected = 1.3441 * 4.0 * 24 + 2.0 * 118.40 / 30
+        assert cost == pytest.approx(expected, rel=1e-4)
+
+    def test_daily_cost_free_tier_zero(self) -> None:
+        from cloud.oci.resource_collector import _daily_cost_for_autonomous_db
+
+        assert _daily_cost_for_autonomous_db(1.0, 0.02, "LICENSE_INCLUDED", True) == 0.0
+
+
+class TestOCIResourceCollectorAutonomousDB:
+    def test_collect_autonomous_db(self) -> None:
+        collector = _make_collector()
+
+        mock_adb = MagicMock()
+        mock_adb.id = "ocid1.autonomousdatabase.oc1..test"
+        mock_adb.display_name = "my-atp"
+        mock_adb.lifecycle_state = "AVAILABLE"
+        mock_adb.cpu_core_count = 2
+        mock_adb.data_storage_size_in_tbs = 1
+        mock_adb.is_free_tier = False
+        mock_adb.license_model = "LICENSE_INCLUDED"
+        mock_adb.db_workload = "OLTP"
+        mock_adb.db_version = "19c"
+        mock_adb.freeform_tags = {}
+
+        mock_pagination_result = MagicMock()
+        mock_pagination_result.data = [mock_adb]
+
+        mock_oci = MagicMock()
+        mock_oci.pagination.list_call_get_all_results.return_value = mock_pagination_result
+
+        with patch.dict("sys.modules", {
+            "oci": mock_oci,
+            "oci.database": mock_oci.database,
+        }):
+            snapshots = collector._collect_autonomous_db()
+
+        assert len(snapshots) == 1
+        s = snapshots[0]
+        assert s.type == "database"
+        assert s.service == "AutonomousDB"
+        assert s.daily_cost > 0
+        assert s.metadata["db_workload"] == "OLTP"
+
+    def test_skip_terminated_adb(self) -> None:
+        collector = _make_collector()
+
+        mock_adb = MagicMock()
+        mock_adb.lifecycle_state = "TERMINATED"
+
+        mock_pagination_result = MagicMock()
+        mock_pagination_result.data = [mock_adb]
+
+        mock_oci = MagicMock()
+        mock_oci.pagination.list_call_get_all_results.return_value = mock_pagination_result
+
+        with patch.dict("sys.modules", {
+            "oci": mock_oci,
+            "oci.database": mock_oci.database,
+        }):
+            snapshots = collector._collect_autonomous_db()
+
+        assert len(snapshots) == 0
+
+
+class TestOCIResourceCollectorObjectStorage:
+    def test_collect_object_storage(self) -> None:
+        collector = _make_collector()
+
+        mock_bucket = MagicMock()
+        mock_bucket.name = "my-bucket"
+        mock_bucket.freeform_tags = {"team": "data"}
+        mock_bucket.storage_tier = "Standard"
+        mock_bucket.time_created = "2025-01-01T00:00:00Z"
+
+        mock_namespace_result = MagicMock()
+        mock_namespace_result.data = "my-namespace"
+
+        mock_bucket_result = MagicMock()
+        mock_bucket_result.data = [mock_bucket]
+
+        mock_oci = MagicMock()
+        mock_os_client = MagicMock()
+        mock_os_client.get_namespace.return_value = mock_namespace_result
+        mock_oci.object_storage.ObjectStorageClient.return_value = mock_os_client
+        mock_oci.pagination.list_call_get_all_results.return_value = mock_bucket_result
+
+        with patch.dict("sys.modules", {
+            "oci": mock_oci,
+            "oci.object_storage": mock_oci.object_storage,
+        }):
+            snapshots = collector._collect_object_storage()
+
+        assert len(snapshots) == 1
+        s = snapshots[0]
+        assert s.type == "storage"
+        assert s.service == "ObjectStorage"
+        assert s.tags == {"team": "data"}
+
+
 class TestOCICollectorConfig:
     def test_builds_config_from_default(self) -> None:
         mock_oci = MagicMock()
