@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -24,7 +24,7 @@ def _make_collector() -> Any:
     c = OCIResourceCollector.__new__(OCIResourceCollector)
     c._compartment_id = "ocid1.compartment.oc1..test"
     c._config = {"tenancy": "ocid1.tenancy.oc1..test", "region": "us-ashburn-1"}
-    c._snapshot_time = datetime(2025, 6, 1, tzinfo=UTC)
+    c._snapshot_time = datetime(2025, 6, 1, tzinfo=timezone.utc)
     return c
 
 

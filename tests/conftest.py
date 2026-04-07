@@ -3,7 +3,7 @@
 
 import tempfile
 from collections.abc import Generator
-from datetime import UTC, date, datetime
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -36,7 +36,7 @@ def sample_resource() -> ResourceSnapshot:
         state="running",
         tags={"env": "production"},
         metadata={"instance_type": "t3.medium"},
-        snapshot_time=datetime(2025, 3, 15, 12, 0, tzinfo=UTC),
+        snapshot_time=datetime(2025, 3, 15, 12, 0, tzinfo=timezone.utc),
     )
 
 
@@ -51,7 +51,7 @@ def sample_cost_snapshot() -> CostSnapshot:
         region="us-east-1",
         usage_type="BoxUsage:t3.medium",
         cost_usd=42.50,
-        snapshot_time=datetime(2025, 3, 15, 12, 0, tzinfo=UTC),
+        snapshot_time=datetime(2025, 3, 15, 12, 0, tzinfo=timezone.utc),
     )
 
 
@@ -64,5 +64,5 @@ def sample_anomaly() -> AnomalyEvent:
         anomaly_type="cost_spike",
         severity="high",
         detail={"previous_cost": 10.0, "current_cost": 50.0},
-        detected_at=datetime(2025, 3, 15, 12, 0, tzinfo=UTC),
+        detected_at=datetime(2025, 3, 15, 12, 0, tzinfo=timezone.utc),
     )

@@ -22,17 +22,23 @@ class StorageAdapter(ABC):
         """Persist detected anomaly events."""
 
     @abstractmethod
-    def get_cost_history(self, provider: str, days: int) -> list[CostSnapshot]:
-        """Return cost snapshots for the last N days."""
+    def get_cost_history(
+        self, provider: str, days: int, account_id: str | None = None,
+    ) -> list[CostSnapshot]:
+        """Return cost snapshots for the last N days, optionally filtered by account."""
 
     @abstractmethod
     def save_savings_plan_snapshots(self, snapshots: list[SavingsPlanSnapshot]) -> None:
         """Persist a batch of savings plan snapshots."""
 
     @abstractmethod
-    def get_savings_plan_snapshots(self, provider: str) -> list[SavingsPlanSnapshot]:
-        """Return savings plan snapshots for a provider."""
+    def get_savings_plan_snapshots(
+        self, provider: str, account_id: str | None = None,
+    ) -> list[SavingsPlanSnapshot]:
+        """Return savings plan snapshots for a provider, optionally filtered by account."""
 
     @abstractmethod
-    def get_resource_snapshots(self, provider: str) -> list[ResourceSnapshot]:
-        """Return the most recent resource snapshots for a provider."""
+    def get_resource_snapshots(
+        self, provider: str, account_id: str | None = None,
+    ) -> list[ResourceSnapshot]:
+        """Return the most recent resource snapshots for a provider, optionally filtered by account."""

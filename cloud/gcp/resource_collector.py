@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from cloud.pricing import PricingProvider
@@ -116,11 +116,11 @@ class GCPResourceCollector:
         self._project_id = project_id
         self._credentials = credentials
         self._pricing = pricing_provider
-        self._snapshot_time = datetime.now(UTC)
+        self._snapshot_time = datetime.now(timezone.utc)
 
     def collect_resources(self) -> list[ResourceSnapshot]:
         """Collect all supported GCP resources for the project."""
-        self._snapshot_time = datetime.now(UTC)
+        self._snapshot_time = datetime.now(timezone.utc)
         snapshots: list[ResourceSnapshot] = []
         collectors = [
             ("Compute VMs", self._collect_instances),
@@ -745,7 +745,7 @@ class GCPResourceCollector:
             logger.warning("Could not create Cloud Monitoring client", exc_info=True)
             return snapshots
 
-        now = datetime.now(UTC)
+        now = datetime.now(timezone.utc)
         start = now - timedelta(days=IDLE_CPU_LOOKBACK_DAYS)
 
         for snap in snapshots:
@@ -774,12 +774,84 @@ class GCPResourceCollector:
                     for point in ts.points:
                         values.append(point.value.double_value * 100)  # fraction → %
                 if values:
-                    snap.metadata["avg_cpu_percent"] = round(
-                        sum(values) / len(values), 2,
-                    )
+                    from cloud.metrics_util import enrich_from_daily_avg_list
+                    enrich_from_daily_avg_list(snap, list(reversed(values)), start)
             except Exception:
                 logger.debug(
                     "Cloud Monitoring CPU lookup failed for %s", snap.resource_id, exc_info=True,
                 )
+
+        return snapshots
+
+    def collect_resource_metrics(self, snapshots: list[ResourceSnapshot]) -> list[ResourceSnapshot]:
+        """Enrich non-compute GCP resources with utilisation metrics.
+
+        Covers: CloudSQL (connections, CPU), LoadBalancer (request count),
+        CloudRun/CloudFunctions (invocations).
+        Metrics are fetched from Cloud Monitoring and stored in metadata.
+        """
+        try:
+            from google.cloud import monitoring_v3  # type: ignore[import-untyped]
+            from google.protobuf.timestamp_pb2 import Timestamp  # type: ignore[import-untyped]
+        except ImportError:
+            logger.debug("google-cloud-monitoring not installed, skipping resource metrics")
+            return snapshots
+
+        kwargs: dict[str, Any] = {}
+        if self._credentials:
+            kwargs["credentials"] = self._credentials
+        try:
+            client = monitoring_v3.MetricServiceClient(**kwargs)
+        except Exception:
+            logger.warning("Could not create Cloud Monitoring client for resource metrics", exc_info=True)
+            return snapshots
+
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=IDLE_CPU_LOOKBACK_DAYS)
+        interval = monitoring_v3.TimeInterval(
+            end_time=Timestamp(seconds=int(now.timestamp())),
+            start_time=Timestamp(seconds=int(start.timestamp())),
+        )
+
+        _metric_map = {
+            "CloudSQL": [
+                ("cloudsql.googleapis.com/database/network/connections", "avg_connections"),
+                ("cloudsql.googleapis.com/database/cpu/utilization", "avg_cpu_percent"),
+            ],
+            "CloudRun": [
+                ("run.googleapis.com/request_count", "total_invocations"),
+            ],
+            "CloudFunctions": [
+                ("cloudfunctions.googleapis.com/function/execution_count", "total_invocations"),
+            ],
+        }
+
+        for snap in snapshots:
+            metrics = _metric_map.get(snap.service)
+            if not metrics:
+                continue
+            for metric_type, meta_key in metrics:
+                try:
+                    results = client.list_time_series(
+                        request={
+                            "name": f"projects/{self._project_id}",
+                            "filter": f'metric.type="{metric_type}"',
+                            "interval": interval,
+                            "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
+                        }
+                    )
+                    values: list[float] = []
+                    for ts in results:
+                        for point in ts.points:
+                            values.append(point.value.double_value)
+                    if values:
+                        if "total" in meta_key:
+                            snap.metadata[meta_key] = round(sum(values))
+                        elif "cpu" in meta_key:
+                            snap.metadata[meta_key] = round(sum(values) / len(values) * 100, 2)
+                        else:
+                            snap.metadata[meta_key] = round(sum(values) / len(values), 2)
+                except Exception:
+                    logger.debug("GCP metric %s failed for %s", metric_type, snap.resource_id, exc_info=True)
 
         return snapshots

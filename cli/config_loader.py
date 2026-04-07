@@ -35,7 +35,8 @@ def load_config(path: str | None = None) -> dict[str, Any]:
     with open(config_path) as f:
         config: dict[str, Any] = yaml.safe_load(f) or {}
 
-    return _deep_merge(_default_config(), config)
+    merged = _deep_merge(_default_config(), config)
+    return _normalize_provider_accounts(merged)
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -92,18 +93,73 @@ def _check_permissions(path: Path) -> None:
             sys.exit(1)
 
 
+def _normalize_provider_accounts(config: dict[str, Any]) -> dict[str, Any]:
+    """Normalise provider config so both old single-account and new multi-account
+    formats are stored as a list under ``accounts``.
+
+    Old (still supported)::
+
+        aws:
+          enabled: true
+          profile: default
+          regions: ["us-east-1"]
+
+    New::
+
+        aws:
+          enabled: true
+          accounts:
+            - name: production
+              profile: default
+              regions: ["us-east-1"]
+    """
+    _PROVIDER_KEYS = ("aws", "gcp", "azure", "oci")
+    # Keys that live at the provider level, not per-account
+    _META_KEYS = {"enabled", "accounts"}
+
+    for provider in _PROVIDER_KEYS:
+        section = config.get(provider)
+        if not isinstance(section, dict):
+            continue
+
+        # Already has accounts list — nothing to migrate
+        if "accounts" in section and isinstance(section["accounts"], list):
+            continue
+
+        # Collect per-account keys from the flat layout
+        acct: dict[str, Any] = {}
+        for k, v in list(section.items()):
+            if k not in _META_KEYS:
+                acct[k] = v
+
+        if acct:
+            acct.setdefault("name", "default")
+            section["accounts"] = [acct]
+            # Remove migrated keys from the provider level
+            for k in acct:
+                if k != "name":
+                    section.pop(k, None)
+
+    return config
+
+
 def _default_config() -> dict[str, Any]:
     return {
         "aws": {
             "enabled": True,
-            "profile": "default",
-            "access_key_id": "",
-            "secret_access_key": "",
-            "regions": ["us-east-1"],
+            "accounts": [
+                {
+                    "name": "default",
+                    "profile": "default",
+                    "access_key_id": "",
+                    "secret_access_key": "",
+                    "regions": ["us-east-1"],
+                },
+            ],
         },
-        "gcp": {"enabled": False},
-        "azure": {"enabled": False},
-        "oci": {"enabled": False},
+        "gcp": {"enabled": False, "accounts": []},
+        "azure": {"enabled": False, "accounts": []},
+        "oci": {"enabled": False, "accounts": []},
         "llm": {
             "provider": "openai",
             "api_key": "",

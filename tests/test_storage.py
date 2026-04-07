@@ -1,7 +1,7 @@
 # Copyright 2025 finops-agent contributors
 # SPDX-License-Identifier: Apache-2.0
 
-from datetime import UTC, date, datetime
+from datetime import date, datetime, timezone
 
 from cost_model.models import AnomalyEvent, CostSnapshot, ResourceSnapshot
 from storage.sqlite_adapter import SQLiteAdapter
@@ -23,7 +23,7 @@ class TestSQLiteAdapter:
             state="running",
             tags={"env": "prod"},
             metadata={"instance_type": "t3.medium"},
-            snapshot_time=datetime(2025, 3, 15, 12, 0, tzinfo=UTC),
+            snapshot_time=datetime(2025, 3, 15, 12, 0, tzinfo=timezone.utc),
         )
         tmp_db.save_resource_snapshots([resource])
 
@@ -43,7 +43,7 @@ class TestSQLiteAdapter:
             region="us-east-1",
             usage_type="BoxUsage",
             cost_usd=42.0,
-            snapshot_time=datetime.now(UTC),
+            snapshot_time=datetime.now(timezone.utc),
         )
         tmp_db.save_cost_snapshots([cost])
 
@@ -60,7 +60,7 @@ class TestSQLiteAdapter:
             anomaly_type="cost_spike",
             severity="high",
             detail={"increase_pct": 150},
-            detected_at=datetime.now(UTC),
+            detected_at=datetime.now(timezone.utc),
         )
         tmp_db.save_anomaly_events([event])
 
@@ -88,7 +88,7 @@ class TestSQLiteAdapter:
                 monthly_cost_estimate=float(i * 300),
                 currency="USD",
                 state="running",
-                snapshot_time=datetime.now(UTC),
+                snapshot_time=datetime.now(timezone.utc),
             )
             for i in range(5)
         ]

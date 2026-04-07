@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from datetime import UTC, date, datetime
+from datetime import date, datetime, timezone
 
 from cost_model.models import CostSnapshot
 
@@ -37,8 +37,8 @@ class OCICostCollector:
         """Fetch daily cost data grouped by service and region."""
         import oci  # type: ignore[import-untyped]
 
-        time_start = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=UTC)
-        time_end = datetime.combine(end_date, datetime.min.time()).replace(tzinfo=UTC)
+        time_start = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+        time_end = datetime.combine(end_date, datetime.min.time()).replace(tzinfo=timezone.utc)
 
         request = oci.usage_api.models.RequestSummarizedUsagesDetails(
             tenant_id=self._tenancy_id,
@@ -90,7 +90,7 @@ class OCICostCollector:
                     region=region.lower().replace(" ", "-"),
                     usage_type="",
                     cost_usd=cost,
-                    snapshot_time=datetime.now(UTC),
+                    snapshot_time=datetime.now(timezone.utc),
                 )
             )
 

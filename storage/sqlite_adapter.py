@@ -4,7 +4,7 @@
 import json
 import logging
 import sqlite3
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from cost_model.models import AnomalyEvent, CostSnapshot, ResourceSnapshot, SavingsPlanSnapshot
@@ -73,6 +73,19 @@ CREATE TABLE IF NOT EXISTS anomaly_events (
 );
 """
 
+# Unique indexes to prevent duplicate rows on repeated collect runs.
+# CREATE UNIQUE INDEX IF NOT EXISTS is safe to run on every startup.
+_DEDUP_INDEXES_SQL = """
+CREATE UNIQUE INDEX IF NOT EXISTS uix_cost_snapshots
+    ON cost_snapshots (provider, account_id, period_start, period_end, service, region, usage_type);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uix_resource_snapshots
+    ON resource_snapshots (provider, account_id, resource_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uix_savings_plan_snapshots
+    ON savings_plan_snapshots (provider, account_id, offering_id);
+"""
+
 
 class SQLiteAdapter(StorageAdapter):
     """SQLite-backed storage for cost, resource, and anomaly data."""
@@ -103,6 +116,7 @@ class SQLiteAdapter(StorageAdapter):
 
     def _init_schema(self) -> None:
         self._conn.executescript(_SCHEMA_SQL)
+        self._conn.executescript(_DEDUP_INDEXES_SQL)
         self._conn.commit()
 
     def close(self) -> None:
@@ -112,7 +126,7 @@ class SQLiteAdapter(StorageAdapter):
     # -- writes ----------------------------------------------------------------
 
     def save_resource_snapshots(self, snapshots: list[ResourceSnapshot]) -> None:
-        """Persist a batch of resource snapshots."""
+        """Persist a batch of resource snapshots (upsert by provider+account+resource_id)."""
         rows = [
             (
                 s.resource_id,
@@ -132,7 +146,7 @@ class SQLiteAdapter(StorageAdapter):
             for s in snapshots
         ]
         self._conn.executemany(
-            "INSERT INTO resource_snapshots "
+            "INSERT OR REPLACE INTO resource_snapshots "
             "(resource_id, provider, account_id, type, service, name, region, "
             "daily_cost, monthly_cost_estimate, state, tags, metadata, snapshot_time) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -142,7 +156,7 @@ class SQLiteAdapter(StorageAdapter):
         logger.info("Saved %d resource snapshots", len(snapshots))
 
     def save_cost_snapshots(self, snapshots: list[CostSnapshot]) -> None:
-        """Persist a batch of cost snapshots."""
+        """Persist a batch of cost snapshots (upsert by natural key)."""
         rows = [
             (
                 s.provider,
@@ -158,7 +172,7 @@ class SQLiteAdapter(StorageAdapter):
             for s in snapshots
         ]
         self._conn.executemany(
-            "INSERT INTO cost_snapshots "
+            "INSERT OR REPLACE INTO cost_snapshots "
             "(provider, account_id, period_start, period_end, service, region, "
             "usage_type, cost_usd, snapshot_time) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -191,7 +205,7 @@ class SQLiteAdapter(StorageAdapter):
         logger.info("Saved %d anomaly events", len(events))
 
     def save_savings_plan_snapshots(self, snapshots: list[SavingsPlanSnapshot]) -> None:
-        """Persist a batch of savings plan snapshots."""
+        """Persist a batch of savings plan snapshots (upsert by offering_id)."""
         rows = [
             (
                 s.provider,
@@ -212,7 +226,7 @@ class SQLiteAdapter(StorageAdapter):
             for s in snapshots
         ]
         self._conn.executemany(
-            "INSERT INTO savings_plan_snapshots "
+            "INSERT OR REPLACE INTO savings_plan_snapshots "
             "(provider, account_id, plan_type, offering_id, service, region, "
             "start_date, end_date, commitment_usd_per_hour, utilization_percent, "
             "coverage_percent, state, metadata, snapshot_time) "
@@ -224,42 +238,58 @@ class SQLiteAdapter(StorageAdapter):
 
     # -- reads -----------------------------------------------------------------
 
-    def get_cost_history(self, provider: str, days: int) -> list[CostSnapshot]:
-        """Return cost snapshots for the last N days."""
-        cutoff = (datetime.now(UTC) - timedelta(days=days)).date().isoformat()
-        cursor = self._conn.execute(
-            "SELECT * FROM cost_snapshots WHERE provider = ? AND period_start >= ? "
-            "ORDER BY period_start DESC",
-            (provider, cutoff),
-        )
+    def get_cost_history(
+        self, provider: str, days: int, account_id: str | None = None,
+    ) -> list[CostSnapshot]:
+        """Return cost snapshots for the last N days, optionally filtered by account."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+        sql = "SELECT * FROM cost_snapshots WHERE provider = ? AND period_start >= ?"
+        params: list[str] = [provider, cutoff]
+        if account_id:
+            sql += " AND account_id = ?"
+            params.append(account_id)
+        sql += " ORDER BY period_start DESC"
+        cursor = self._conn.execute(sql, params)
         return [self._row_to_cost_snapshot(row) for row in cursor.fetchall()]
 
-    def get_resource_snapshots(self, provider: str) -> list[ResourceSnapshot]:
-        """Return the most recent resource snapshots for a provider."""
-        cursor = self._conn.execute(
-            "SELECT * FROM resource_snapshots WHERE provider = ? "
-            "ORDER BY snapshot_time DESC",
-            (provider,),
-        )
+    def get_resource_snapshots(
+        self, provider: str, account_id: str | None = None,
+    ) -> list[ResourceSnapshot]:
+        """Return the most recent resource snapshots for a provider, optionally filtered by account."""
+        sql = "SELECT * FROM resource_snapshots WHERE provider = ?"
+        params: list[str] = [provider]
+        if account_id:
+            sql += " AND account_id = ?"
+            params.append(account_id)
+        sql += " ORDER BY snapshot_time DESC"
+        cursor = self._conn.execute(sql, params)
         return [self._row_to_resource_snapshot(row) for row in cursor.fetchall()]
 
-    def get_savings_plan_snapshots(self, provider: str) -> list[SavingsPlanSnapshot]:
-        """Return savings plan snapshots for a provider."""
-        cursor = self._conn.execute(
-            "SELECT * FROM savings_plan_snapshots WHERE provider = ? "
-            "ORDER BY snapshot_time DESC",
-            (provider,),
-        )
+    def get_savings_plan_snapshots(
+        self, provider: str, account_id: str | None = None,
+    ) -> list[SavingsPlanSnapshot]:
+        """Return savings plan snapshots for a provider, optionally filtered by account."""
+        sql = "SELECT * FROM savings_plan_snapshots WHERE provider = ?"
+        params: list[str] = [provider]
+        if account_id:
+            sql += " AND account_id = ?"
+            params.append(account_id)
+        sql += " ORDER BY snapshot_time DESC"
+        cursor = self._conn.execute(sql, params)
         return [self._row_to_savings_plan_snapshot(row) for row in cursor.fetchall()]
 
-    def get_anomaly_events(self, provider: str, days: int) -> list[AnomalyEvent]:
-        """Return anomaly events for the last N days."""
-        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
-        cursor = self._conn.execute(
-            "SELECT * FROM anomaly_events WHERE provider = ? AND detected_at >= ? "
-            "ORDER BY detected_at DESC",
-            (provider, cutoff),
-        )
+    def get_anomaly_events(
+        self, provider: str, days: int, account_id: str | None = None,
+    ) -> list[AnomalyEvent]:
+        """Return anomaly events for the last N days, optionally filtered by account."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        sql = "SELECT * FROM anomaly_events WHERE provider = ? AND detected_at >= ?"
+        params: list[str] = [provider, cutoff]
+        if account_id:
+            sql += " AND account_id = ?"
+            params.append(account_id)
+        sql += " ORDER BY detected_at DESC"
+        cursor = self._conn.execute(sql, params)
         return [self._row_to_anomaly_event(row) for row in cursor.fetchall()]
 
     # -- row mappers -----------------------------------------------------------

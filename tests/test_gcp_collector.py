@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -204,7 +204,7 @@ class TestGCPResourceCollectorInstances:
         c = GCPResourceCollector.__new__(GCPResourceCollector)
         c._project_id = "test-project"
         c._credentials = None
-        c._snapshot_time = datetime(2025, 3, 1, tzinfo=UTC)
+        c._snapshot_time = datetime(2025, 3, 1, tzinfo=timezone.utc)
         return c
 
     def test_collect_instances_basic(self) -> None:
@@ -290,7 +290,7 @@ class TestGCPResourceCollectorDisks:
         c = GCPResourceCollector.__new__(GCPResourceCollector)
         c._project_id = "test-project"
         c._credentials = None
-        c._snapshot_time = datetime(2025, 3, 1, tzinfo=UTC)
+        c._snapshot_time = datetime(2025, 3, 1, tzinfo=timezone.utc)
         return c
 
     def test_unattached_disk(self) -> None:
@@ -364,7 +364,7 @@ class TestGCPResourceCollectorCloudSQL:
         c = GCPResourceCollector.__new__(GCPResourceCollector)
         c._project_id = "test-project"
         c._credentials = None
-        c._snapshot_time = datetime(2025, 3, 1, tzinfo=UTC)
+        c._snapshot_time = datetime(2025, 3, 1, tzinfo=timezone.utc)
         return c
 
     def test_collect_cloud_sql(self) -> None:

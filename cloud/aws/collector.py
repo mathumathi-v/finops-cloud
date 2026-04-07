@@ -47,8 +47,11 @@ class AWSCollector(CloudCollector):
         return self._cost_collector.collect_costs(start_date, end_date)
 
     def collect_resources(self) -> list[ResourceSnapshot]:
-        """Fetch current live resource metadata and cost."""
-        return self._resource_collector.collect_resources()
+        """Fetch current live resource metadata, cost, and utilisation metrics."""
+        snapshots = self._resource_collector.collect_resources()
+        snapshots = self._resource_collector.collect_cpu_metrics(snapshots)
+        snapshots = self._resource_collector.collect_resource_metrics(snapshots)
+        return snapshots
 
     def test_connection(self) -> bool:
         """Verify credentials work by calling STS."""

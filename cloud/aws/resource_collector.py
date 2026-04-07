@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import boto3
@@ -238,7 +238,7 @@ class AWSResourceCollector:
                                 "launch_time": inst.get("LaunchTime", ""),
                                 "vpc_id": inst.get("VpcId", ""),
                             },
-                            snapshot_time=datetime.now(UTC),
+                            snapshot_time=datetime.now(timezone.utc),
                         )
                     )
 
@@ -281,7 +281,7 @@ class AWSResourceCollector:
                             "iops": vol.get("Iops", 0),
                             "encrypted": vol.get("Encrypted", False),
                         },
-                        snapshot_time=datetime.now(UTC),
+                        snapshot_time=datetime.now(timezone.utc),
                     )
                 )
 
@@ -321,7 +321,7 @@ class AWSResourceCollector:
                             "dns_name": lb.get("DNSName", ""),
                             "vpc_id": lb.get("VpcId", ""),
                         },
-                        snapshot_time=datetime.now(UTC),
+                        snapshot_time=datetime.now(timezone.utc),
                     )
                 )
 
@@ -360,7 +360,7 @@ class AWSResourceCollector:
                             "vpc_id": nat.get("VpcId", ""),
                             "connectivity_type": nat.get("ConnectivityType", ""),
                         },
-                        snapshot_time=datetime.now(UTC),
+                        snapshot_time=datetime.now(timezone.utc),
                     )
                 )
 
@@ -398,7 +398,7 @@ class AWSResourceCollector:
                         "platform_version": cluster.get("platformVersion", ""),
                         "endpoint": cluster.get("endpoint", ""),
                     },
-                    snapshot_time=datetime.now(UTC),
+                    snapshot_time=datetime.now(timezone.utc),
                 )
             )
 
@@ -440,7 +440,7 @@ class AWSResourceCollector:
                             "ami_type": ng.get("amiType", ""),
                             "capacity_type": ng.get("capacityType", ""),
                         },
-                        snapshot_time=datetime.now(UTC),
+                        snapshot_time=datetime.now(timezone.utc),
                     )
                 )
 
@@ -490,7 +490,7 @@ class AWSResourceCollector:
                             "multi_az": multi_az,
                             "vpc_id": inst.get("DBSubnetGroup", {}).get("VpcId", ""),
                         },
-                        snapshot_time=datetime.now(UTC),
+                        snapshot_time=datetime.now(timezone.utc),
                     )
                 )
 
@@ -529,7 +529,7 @@ class AWSResourceCollector:
                     metadata={
                         "creation_date": str(bucket.get("CreationDate", "")),
                     },
-                    snapshot_time=datetime.now(UTC),
+                    snapshot_time=datetime.now(timezone.utc),
                 )
             )
 
@@ -567,7 +567,7 @@ class AWSResourceCollector:
                             "handler": fn.get("Handler", ""),
                             "last_modified": fn.get("LastModified", ""),
                         },
-                        snapshot_time=datetime.now(UTC),
+                        snapshot_time=datetime.now(timezone.utc),
                     )
                 )
 
@@ -606,7 +606,7 @@ class AWSResourceCollector:
                         "customer_gateway_id": vpn.get("CustomerGatewayId", ""),
                         "type": vpn.get("Type", ""),
                     },
-                    snapshot_time=datetime.now(UTC),
+                    snapshot_time=datetime.now(timezone.utc),
                 )
             )
 
@@ -645,7 +645,7 @@ class AWSResourceCollector:
                                 dist.get("Origins", {}).get("Items", [])
                             ),
                         },
-                        snapshot_time=datetime.now(UTC),
+                        snapshot_time=datetime.now(timezone.utc),
                     )
                 )
 
@@ -682,7 +682,7 @@ class AWSResourceCollector:
                         ),
                         "created_date": str(api.get("createdDate", "")),
                     },
-                    snapshot_time=datetime.now(UTC),
+                    snapshot_time=datetime.now(timezone.utc),
                 )
             )
 
@@ -692,8 +692,16 @@ class AWSResourceCollector:
     # -- CPU Metrics (CloudWatch) ----------------------------------------------
 
     def collect_cpu_metrics(self, snapshots: list[ResourceSnapshot]) -> list[ResourceSnapshot]:
-        """Enrich running EC2 instances with average CPU utilization from CloudWatch."""
-        now = datetime.now(UTC)
+        """Enrich running EC2 instances with CPU utilization metrics from CloudWatch.
+
+        Populates the following metadata keys:
+        - ``avg_cpu_percent``: overall average CPU over the lookback window
+        - ``max_cpu_percent``: peak (maximum) daily CPU over the window
+        - ``p95_cpu_percent``: 95th-percentile daily average CPU
+        - ``cpu_daily_values``: list of ``{"date": "YYYY-MM-DD", "weekday": 0-6, "avg": float}``
+        - ``cpu_trend_direction``: "declining", "increasing", or "stable"
+        """
+        now = datetime.now(timezone.utc)
         start = now - timedelta(days=IDLE_CPU_LOOKBACK_DAYS)
 
         # Group EC2 instances by region
@@ -718,15 +726,228 @@ class AWSResourceCollector:
                         StartTime=start,
                         EndTime=now,
                         Period=86400,
-                        Statistics=["Average"],
+                        Statistics=["Average", "Maximum"],
                     )
                     datapoints = resp.get("Datapoints", [])
                     if datapoints:
-                        avg = sum(dp["Average"] for dp in datapoints) / len(datapoints)
-                        snap.metadata["avg_cpu_percent"] = round(avg, 2)
+                        from cloud.metrics_util import enrich_from_cloudwatch_datapoints
+                        enrich_from_cloudwatch_datapoints(snap, datapoints)
                 except Exception:
                     logger.debug(
                         "CloudWatch CPU lookup failed for %s", snap.resource_id, exc_info=True,
                     )
 
         return snapshots
+
+    # -- Additional Resource Metrics (CloudWatch) ---------------------------------
+
+    def collect_resource_metrics(self, snapshots: list[ResourceSnapshot]) -> list[ResourceSnapshot]:
+        """Enrich non-compute resources with utilisation metrics from CloudWatch.
+
+        Covers: RDS, ELB, NAT Gateway, EBS, Lambda, S3.
+        """
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=IDLE_CPU_LOOKBACK_DAYS)
+
+        by_region: dict[str, list[ResourceSnapshot]] = {}
+        for s in snapshots:
+            if s.provider == "aws" and s.service in (
+                "RDS", "ELB", "NAT Gateway", "EBS", "Lambda", "S3",
+            ):
+                by_region.setdefault(s.region, []).append(s)
+
+        for region, resources in by_region.items():
+            try:
+                cw = self._session.client("cloudwatch", region_name=region)
+            except Exception:
+                logger.warning("Could not create CloudWatch client for %s", region)
+                continue
+
+            for snap in resources:
+                try:
+                    if snap.service == "RDS":
+                        self._enrich_rds(cw, snap, start, now)
+                    elif snap.service == "ELB":
+                        self._enrich_elb(cw, snap, start, now)
+                    elif snap.service == "NAT Gateway":
+                        self._enrich_nat(cw, snap, start, now)
+                    elif snap.service == "EBS":
+                        self._enrich_ebs(cw, snap, start, now)
+                    elif snap.service == "Lambda":
+                        self._enrich_lambda(cw, snap, start, now)
+                    elif snap.service == "S3":
+                        self._enrich_s3(cw, snap, start, now)
+                except Exception:
+                    logger.debug(
+                        "CloudWatch metric lookup failed for %s/%s",
+                        snap.service, snap.resource_id, exc_info=True,
+                    )
+
+        return snapshots
+
+    # -- per-service metric helpers -----------------------------------------------
+
+    @staticmethod
+    def _enrich_rds(
+        cw: Any, snap: ResourceSnapshot, start: datetime, end: datetime,
+    ) -> None:
+        """Enrich RDS with DatabaseConnections and CPUUtilization."""
+        db_id = snap.name or snap.resource_id.rsplit(":", 1)[-1]
+
+        # Database connections
+        resp = cw.get_metric_statistics(
+            Namespace="AWS/RDS", MetricName="DatabaseConnections",
+            Dimensions=[{"Name": "DBInstanceIdentifier", "Value": db_id}],
+            StartTime=start, EndTime=end, Period=86400, Statistics=["Average", "Maximum"],
+        )
+        dps = resp.get("Datapoints", [])
+        if dps:
+            avgs = [d["Average"] for d in dps]
+            snap.metadata["avg_connections"] = round(sum(avgs) / len(avgs), 2)
+            snap.metadata["max_connections"] = round(max(d.get("Maximum", d["Average"]) for d in dps), 2)
+            snap.metadata["connection_days"] = len(dps)
+
+        # CPU
+        resp = cw.get_metric_statistics(
+            Namespace="AWS/RDS", MetricName="CPUUtilization",
+            Dimensions=[{"Name": "DBInstanceIdentifier", "Value": db_id}],
+            StartTime=start, EndTime=end, Period=86400, Statistics=["Average"],
+        )
+        dps = resp.get("Datapoints", [])
+        if dps:
+            avgs = [d["Average"] for d in dps]
+            snap.metadata["avg_cpu_percent"] = round(sum(avgs) / len(avgs), 2)
+
+    @staticmethod
+    def _enrich_elb(
+        cw: Any, snap: ResourceSnapshot, start: datetime, end: datetime,
+    ) -> None:
+        """Enrich ELB/ALB with RequestCount and ActiveConnectionCount."""
+        elb_type = snap.metadata.get("type", "application")
+        # Extract ARN suffix for dimension
+        arn_suffix = snap.resource_id.split("loadbalancer/", 1)[-1] if "loadbalancer/" in snap.resource_id else snap.resource_id
+
+        if elb_type == "application":
+            namespace = "AWS/ApplicationELB"
+            dim_name = "LoadBalancer"
+            metric = "RequestCount"
+        else:
+            namespace = "AWS/NetworkELB"
+            dim_name = "LoadBalancer"
+            metric = "ActiveFlowCount"
+
+        resp = cw.get_metric_statistics(
+            Namespace=namespace, MetricName=metric,
+            Dimensions=[{"Name": dim_name, "Value": arn_suffix}],
+            StartTime=start, EndTime=end, Period=86400, Statistics=["Sum"],
+        )
+        dps = resp.get("Datapoints", [])
+        if dps:
+            totals = [d["Sum"] for d in dps]
+            snap.metadata["total_requests"] = round(sum(totals))
+            snap.metadata["avg_daily_requests"] = round(sum(totals) / len(totals), 2)
+            snap.metadata["request_days"] = len(dps)
+            snap.metadata["zero_traffic_days"] = sum(1 for t in totals if t == 0)
+
+    @staticmethod
+    def _enrich_nat(
+        cw: Any, snap: ResourceSnapshot, start: datetime, end: datetime,
+    ) -> None:
+        """Enrich NAT Gateway with BytesOutToDestination."""
+        nat_id = snap.resource_id.rsplit("/", 1)[-1] if "/" in snap.resource_id else snap.resource_id
+
+        resp = cw.get_metric_statistics(
+            Namespace="AWS/NATGateway", MetricName="BytesOutToDestination",
+            Dimensions=[{"Name": "NatGatewayId", "Value": nat_id}],
+            StartTime=start, EndTime=end, Period=86400, Statistics=["Sum"],
+        )
+        dps = resp.get("Datapoints", [])
+        if dps:
+            totals = [d["Sum"] for d in dps]
+            total_bytes = sum(totals)
+            snap.metadata["total_bytes_processed"] = total_bytes
+            snap.metadata["avg_daily_gb"] = round(total_bytes / len(totals) / (1024**3), 4)
+            snap.metadata["zero_traffic_days"] = sum(1 for t in totals if t == 0)
+            snap.metadata["traffic_days"] = len(dps)
+
+    @staticmethod
+    def _enrich_ebs(
+        cw: Any, snap: ResourceSnapshot, start: datetime, end: datetime,
+    ) -> None:
+        """Enrich EBS with VolumeReadOps + VolumeWriteOps."""
+        vol_id = snap.resource_id
+
+        total_ops = 0.0
+        days_with_data = 0
+        for metric_name in ("VolumeReadOps", "VolumeWriteOps"):
+            resp = cw.get_metric_statistics(
+                Namespace="AWS/EBS", MetricName=metric_name,
+                Dimensions=[{"Name": "VolumeId", "Value": vol_id}],
+                StartTime=start, EndTime=end, Period=86400, Statistics=["Sum"],
+            )
+            dps = resp.get("Datapoints", [])
+            if dps:
+                total_ops += sum(d["Sum"] for d in dps)
+                days_with_data = max(days_with_data, len(dps))
+
+        if days_with_data > 0:
+            snap.metadata["total_iops"] = round(total_ops)
+            snap.metadata["avg_daily_iops"] = round(total_ops / days_with_data, 2)
+            snap.metadata["iops_days"] = days_with_data
+
+    @staticmethod
+    def _enrich_lambda(
+        cw: Any, snap: ResourceSnapshot, start: datetime, end: datetime,
+    ) -> None:
+        """Enrich Lambda with Invocations count."""
+        func_name = snap.name or snap.resource_id.rsplit(":", 1)[-1]
+
+        resp = cw.get_metric_statistics(
+            Namespace="AWS/Lambda", MetricName="Invocations",
+            Dimensions=[{"Name": "FunctionName", "Value": func_name}],
+            StartTime=start, EndTime=end, Period=86400, Statistics=["Sum"],
+        )
+        dps = resp.get("Datapoints", [])
+        if dps:
+            totals = [d["Sum"] for d in dps]
+            snap.metadata["total_invocations"] = round(sum(totals))
+            snap.metadata["avg_daily_invocations"] = round(sum(totals) / len(totals), 2)
+            snap.metadata["zero_invocation_days"] = sum(1 for t in totals if t == 0)
+            snap.metadata["invocation_days"] = len(dps)
+
+        # Also get errors
+        resp = cw.get_metric_statistics(
+            Namespace="AWS/Lambda", MetricName="Errors",
+            Dimensions=[{"Name": "FunctionName", "Value": func_name}],
+            StartTime=start, EndTime=end, Period=86400, Statistics=["Sum"],
+        )
+        dps = resp.get("Datapoints", [])
+        if dps:
+            snap.metadata["total_errors"] = round(sum(d["Sum"] for d in dps))
+
+    @staticmethod
+    def _enrich_s3(
+        cw: Any, snap: ResourceSnapshot, start: datetime, end: datetime,
+    ) -> None:
+        """Enrich S3 with NumberOfObjects and BucketSizeBytes."""
+        bucket_name = snap.name or snap.resource_id
+
+        for metric, storage_type in [
+            ("BucketSizeBytes", "StandardStorage"),
+            ("NumberOfObjects", "AllStorageTypes"),
+        ]:
+            resp = cw.get_metric_statistics(
+                Namespace="AWS/S3", MetricName=metric,
+                Dimensions=[
+                    {"Name": "BucketName", "Value": bucket_name},
+                    {"Name": "StorageType", "Value": storage_type},
+                ],
+                StartTime=start, EndTime=end, Period=86400, Statistics=["Average"],
+            )
+            dps = resp.get("Datapoints", [])
+            if dps:
+                val = dps[-1]["Average"]  # most recent
+                if metric == "BucketSizeBytes":
+                    snap.metadata["bucket_size_gb"] = round(val / (1024**3), 2)
+                else:
+                    snap.metadata["object_count"] = round(val)

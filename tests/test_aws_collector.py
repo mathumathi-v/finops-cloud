@@ -1,7 +1,7 @@
 # Copyright 2025 finops-agent contributors
 # SPDX-License-Identifier: Apache-2.0
 
-from datetime import UTC, date, datetime
+from datetime import date, datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -421,8 +421,8 @@ class TestAWSCpuMetrics:
         mock_session.client.return_value = mock_cw
         mock_cw.get_metric_statistics.return_value = {
             "Datapoints": [
-                {"Average": 3.5},
-                {"Average": 2.1},
+                {"Timestamp": datetime(2025, 3, 14, tzinfo=timezone.utc), "Average": 3.5, "Maximum": 5.0},
+                {"Timestamp": datetime(2025, 3, 15, tzinfo=timezone.utc), "Average": 2.1, "Maximum": 4.0},
             ]
         }
 
@@ -431,7 +431,7 @@ class TestAWSCpuMetrics:
             type="compute", service="EC2", name="test", region="us-east-1",
             daily_cost=1.0, monthly_cost_estimate=30.0, currency="USD",
             state="running", metadata={"instance_type": "t3.medium"},
-            snapshot_time=datetime.now(UTC),
+            snapshot_time=datetime.now(timezone.utc),
         )
 
         collector = AWSResourceCollector(mock_session, "123", ["us-east-1"])
@@ -450,7 +450,7 @@ class TestAWSCpuMetrics:
             type="compute", service="EC2", name="stopped", region="us-east-1",
             daily_cost=0.0, monthly_cost_estimate=0.0, currency="USD",
             state="stopped", metadata={},
-            snapshot_time=datetime.now(UTC),
+            snapshot_time=datetime.now(timezone.utc),
         )
 
         collector = AWSResourceCollector(mock_session, "123", ["us-east-1"])
@@ -472,7 +472,7 @@ class TestAWSCpuMetrics:
             type="compute", service="EC2", name="err", region="us-east-1",
             daily_cost=1.0, monthly_cost_estimate=30.0, currency="USD",
             state="running", metadata={"instance_type": "t3.medium"},
-            snapshot_time=datetime.now(UTC),
+            snapshot_time=datetime.now(timezone.utc),
         )
 
         collector = AWSResourceCollector(mock_session, "123", ["us-east-1"])

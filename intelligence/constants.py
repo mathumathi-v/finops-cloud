@@ -15,6 +15,12 @@ OVERSIZED_CPU_DAYS: int = 3
 IDLE_CPU_PERCENT_THRESHOLD: float = 5.0
 IDLE_CPU_LOOKBACK_DAYS: int = 14
 
+# Pattern-based waste detection thresholds
+IDLE_CPU_P95_THRESHOLD: float = 15.0       # P95 CPU below this AND avg below threshold = truly idle
+OFFHOURS_IDLE_CPU_THRESHOLD: float = 3.0   # CPU threshold for off-hours/weekend analysis
+DECLINING_CPU_MIN_DROP_PERCENT: float = 40.0  # flag if CPU dropped by this % over lookback period
+STOPPED_FIRST_SEEN_DAYS: int = 7           # flag stopped resources only after this many days
+
 # Forecast parameters
 FORECAST_LOOKBACK_DAYS: int = 14
 

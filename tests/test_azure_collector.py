@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -25,7 +25,7 @@ def _make_collector() -> Any:
     c = AzureResourceCollector.__new__(AzureResourceCollector)
     c._subscription_id = "sub-test-1234"
     c._credential = MagicMock()
-    c._snapshot_time = datetime(2025, 6, 1, tzinfo=UTC)
+    c._snapshot_time = datetime(2025, 6, 1, tzinfo=timezone.utc)
     return c
 
 

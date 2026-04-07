@@ -18,6 +18,10 @@ class CostContributor:
     name: str
     total_cost_usd: float
     percentage: float
+    resource_id: str = ""
+    service: str = ""
+    region: str = ""
+    state: str = ""
 
 
 def top_regions(cost_history: list[CostSnapshot], n: int = TOP_N_RESULTS) -> list[CostContributor]:
@@ -44,12 +48,29 @@ def top_resources(
     resources: list[ResourceSnapshot], n: int = TOP_N_RESULTS
 ) -> list[CostContributor]:
     """Return top N resources by daily cost."""
-    totals: dict[str, float] = {}
-    for r in resources:
-        label = f"{r.service}/{r.name or r.resource_id}"
-        totals[label] = r.daily_cost
+    # Build list with full resource details, then sort and rank.
+    entries: list[tuple[ResourceSnapshot, float]] = [
+        (r, r.daily_cost) for r in resources if r.daily_cost > 0
+    ]
+    entries.sort(key=lambda x: x[1], reverse=True)
+    entries = entries[:n]
 
-    return _rank(totals, n)
+    grand_total = sum(cost for _, cost in entries)
+    if grand_total == 0:
+        return []
+
+    return [
+        CostContributor(
+            name=r.name or r.resource_id,
+            total_cost_usd=round(cost, 2),
+            percentage=round((cost / grand_total) * 100, 1),
+            resource_id=r.resource_id,
+            service=r.service,
+            region=r.region,
+            state=r.state,
+        )
+        for r, cost in entries
+    ]
 
 
 def _rank(totals: dict[str, float], n: int) -> list[CostContributor]:

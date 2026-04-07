@@ -1,7 +1,7 @@
 # Copyright 2025 finops-agent contributors
 # SPDX-License-Identifier: Apache-2.0
 
-from datetime import UTC, date, datetime
+from datetime import date, datetime, timezone
 
 from cost_model.models import CostSnapshot, ResourceSnapshot
 from intelligence.anomaly import (
@@ -29,13 +29,13 @@ class TestCostSpikeDetection:
                 provider="aws", account_id="a", period_start=date(2025, 3, 1),
                 period_end=date(2025, 3, 2), service="EC2", region="us-east-1",
                 usage_type="", cost_usd=100.0,
-                snapshot_time=datetime(2025, 3, 2, tzinfo=UTC),
+                snapshot_time=datetime(2025, 3, 2, tzinfo=timezone.utc),
             ),
             CostSnapshot(
                 provider="aws", account_id="a", period_start=date(2025, 3, 2),
                 period_end=date(2025, 3, 3), service="EC2", region="us-east-1",
                 usage_type="", cost_usd=200.0,
-                snapshot_time=datetime(2025, 3, 3, tzinfo=UTC),
+                snapshot_time=datetime(2025, 3, 3, tzinfo=timezone.utc),
             ),
         ]
         events = detect_cost_spikes(history)
@@ -49,13 +49,13 @@ class TestCostSpikeDetection:
                 provider="aws", account_id="a", period_start=date(2025, 3, 1),
                 period_end=date(2025, 3, 2), service="EC2", region="us-east-1",
                 usage_type="", cost_usd=100.0,
-                snapshot_time=datetime(2025, 3, 2, tzinfo=UTC),
+                snapshot_time=datetime(2025, 3, 2, tzinfo=timezone.utc),
             ),
             CostSnapshot(
                 provider="aws", account_id="a", period_start=date(2025, 3, 2),
                 period_end=date(2025, 3, 3), service="EC2", region="us-east-1",
                 usage_type="", cost_usd=110.0,
-                snapshot_time=datetime(2025, 3, 3, tzinfo=UTC),
+                snapshot_time=datetime(2025, 3, 3, tzinfo=timezone.utc),
             ),
         ]
         events = detect_cost_spikes(history)
@@ -73,7 +73,7 @@ class TestNewHighCostResources:
                 type="compute", service="EC2", name="big-box", region="us-east-1",
                 daily_cost=100.0, monthly_cost_estimate=3000.0, currency="USD",
                 state="running",
-                snapshot_time=datetime.now(UTC),
+                snapshot_time=datetime.now(timezone.utc),
             ),
         ]
         events = detect_new_high_cost_resources(resources)
@@ -87,7 +87,7 @@ class TestNewHighCostResources:
                 type="compute", service="EC2", name="small", region="us-east-1",
                 daily_cost=5.0, monthly_cost_estimate=150.0, currency="USD",
                 state="running",
-                snapshot_time=datetime.now(UTC),
+                snapshot_time=datetime.now(timezone.utc),
             ),
         ]
         events = detect_new_high_cost_resources(resources)
@@ -102,7 +102,7 @@ class TestSuddenScaling:
                 type="compute", service="EC2", name=f"s-{i}", region="us-east-1",
                 daily_cost=5.0, monthly_cost_estimate=150.0, currency="USD",
                 state="running",
-                snapshot_time=datetime.now(UTC),
+                snapshot_time=datetime.now(timezone.utc),
             )
             for i in range(2)
         ]
@@ -112,7 +112,7 @@ class TestSuddenScaling:
                 type="compute", service="EC2", name=f"s-{i}", region="us-east-1",
                 daily_cost=5.0, monthly_cost_estimate=150.0, currency="USD",
                 state="running",
-                snapshot_time=datetime.now(UTC),
+                snapshot_time=datetime.now(timezone.utc),
             )
             for i in range(5)
         ]
@@ -132,7 +132,7 @@ class TestWasteDetection:
                 daily_cost=1.0, monthly_cost_estimate=30.0, currency="USD",
                 state="unattached",
                 metadata={"size_gb": 100, "volume_type": "gp3"},
-                snapshot_time=datetime.now(UTC),
+                snapshot_time=datetime.now(timezone.utc),
             ),
         ]
         findings = detect_unattached_disks(resources)
@@ -147,8 +147,8 @@ class TestWasteDetection:
                 type="compute", service="EC2", name="stopped-box", region="us-east-1",
                 daily_cost=0, monthly_cost_estimate=50.0, currency="USD",
                 state="stopped",
-                metadata={"instance_type": "m5.large"},
-                snapshot_time=datetime.now(UTC),
+                metadata={"instance_type": "m5.large", "stopped_days": 15},
+                snapshot_time=datetime.now(timezone.utc),
             ),
         ]
         findings = detect_stopped_instances(resources)
@@ -163,7 +163,7 @@ class TestWasteDetection:
                 daily_cost=1.08, monthly_cost_estimate=32.40, currency="USD",
                 state="available",
                 metadata={"subnet_id": "subnet-abc"},
-                snapshot_time=datetime.now(UTC),
+                snapshot_time=datetime.now(timezone.utc),
             ),
         ]
         findings = detect_idle_nat_gateways(resources)
@@ -177,7 +177,7 @@ class TestWasteDetection:
                 type="network", service="ElasticIP", name="", region="us-east-1",
                 daily_cost=0.12, monthly_cost_estimate=3.60, currency="USD",
                 state="unattached",
-                snapshot_time=datetime.now(UTC),
+                snapshot_time=datetime.now(timezone.utc),
             ),
         ]
         findings = detect_unused_elastic_ips(resources)
@@ -191,14 +191,14 @@ class TestWasteDetection:
                 type="storage", service="EBS", name="", region="us-east-1",
                 daily_cost=0, monthly_cost_estimate=0, currency="USD",
                 state="unattached", metadata={"size_gb": 50, "volume_type": "gp3"},
-                snapshot_time=datetime.now(UTC),
+                snapshot_time=datetime.now(timezone.utc),
             ),
             ResourceSnapshot(
                 resource_id="i-stop", provider="aws", account_id="a",
                 type="compute", service="EC2", name="", region="us-east-1",
                 daily_cost=0, monthly_cost_estimate=25.0, currency="USD",
-                state="stopped", metadata={"instance_type": "t3.small"},
-                snapshot_time=datetime.now(UTC),
+                state="stopped", metadata={"instance_type": "t3.small", "stopped_days": 10},
+                snapshot_time=datetime.now(timezone.utc),
             ),
         ]
         findings = find_all_waste(resources)
@@ -213,7 +213,7 @@ class TestWasteDetection:
                 type="compute", service="EC2", name="healthy", region="us-east-1",
                 daily_cost=10, monthly_cost_estimate=300, currency="USD",
                 state="running",
-                snapshot_time=datetime.now(UTC),
+                snapshot_time=datetime.now(timezone.utc),
             ),
         ]
         findings = find_all_waste(resources)
@@ -229,7 +229,7 @@ class TestIdleInstanceDetection:
                 daily_cost=2.0, monthly_cost_estimate=60.0, currency="USD",
                 state="running",
                 metadata={"instance_type": "t3.medium", "avg_cpu_percent": 2.0},
-                snapshot_time=datetime.now(UTC),
+                snapshot_time=datetime.now(timezone.utc),
             ),
         ]
         findings = detect_idle_instances(resources)
@@ -245,7 +245,7 @@ class TestIdleInstanceDetection:
                 daily_cost=2.0, monthly_cost_estimate=60.0, currency="USD",
                 state="running",
                 metadata={"instance_type": "m5.large", "avg_cpu_percent": 45.0},
-                snapshot_time=datetime.now(UTC),
+                snapshot_time=datetime.now(timezone.utc),
             ),
         ]
         findings = detect_idle_instances(resources)
@@ -259,7 +259,7 @@ class TestIdleInstanceDetection:
                 daily_cost=2.0, monthly_cost_estimate=60.0, currency="USD",
                 state="running",
                 metadata={"instance_type": "t3.medium"},
-                snapshot_time=datetime.now(UTC),
+                snapshot_time=datetime.now(timezone.utc),
             ),
         ]
         findings = detect_idle_instances(resources)
@@ -273,7 +273,7 @@ class TestIdleInstanceDetection:
                 daily_cost=0.0, monthly_cost_estimate=0.0, currency="USD",
                 state="stopped",
                 metadata={"instance_type": "t3.medium", "avg_cpu_percent": 0.0},
-                snapshot_time=datetime.now(UTC),
+                snapshot_time=datetime.now(timezone.utc),
             ),
         ]
         findings = detect_idle_instances(resources)
@@ -287,7 +287,7 @@ class TestIdleInstanceDetection:
                 daily_cost=2.0, monthly_cost_estimate=60.0, currency="USD",
                 state="running",
                 metadata={"instance_type": "t3.medium", "avg_cpu_percent": 1.5},
-                snapshot_time=datetime.now(UTC),
+                snapshot_time=datetime.now(timezone.utc),
             ),
         ]
         findings = find_all_waste(resources)
@@ -306,7 +306,7 @@ class TestForecast:
                 period_end=date(2025, 3, i + 2),
                 service="EC2", region="us-east-1", usage_type="",
                 cost_usd=100.0,
-                snapshot_time=datetime(2025, 3, i + 1, tzinfo=UTC),
+                snapshot_time=datetime(2025, 3, i + 1, tzinfo=timezone.utc),
             )
             for i in range(14)
         ]
@@ -327,7 +327,7 @@ class TestForecast:
                 period_end=date(2025, 3, i + 2),
                 service="EC2", region="us-east-1", usage_type="",
                 cost_usd=50.0 + i * 10.0,
-                snapshot_time=datetime(2025, 3, i + 1, tzinfo=UTC),
+                snapshot_time=datetime(2025, 3, i + 1, tzinfo=timezone.utc),
             )
             for i in range(14)
         ]
@@ -345,13 +345,13 @@ class TestContributors:
                 provider="aws", account_id="a", period_start=date(2025, 3, 1),
                 period_end=date(2025, 3, 2), service="EC2", region="us-east-1",
                 usage_type="", cost_usd=100.0,
-                snapshot_time=datetime.now(UTC),
+                snapshot_time=datetime.now(timezone.utc),
             ),
             CostSnapshot(
                 provider="aws", account_id="a", period_start=date(2025, 3, 1),
                 period_end=date(2025, 3, 2), service="RDS", region="us-east-1",
                 usage_type="", cost_usd=50.0,
-                snapshot_time=datetime.now(UTC),
+                snapshot_time=datetime.now(timezone.utc),
             ),
         ]
         result = top_services(history)
@@ -365,13 +365,13 @@ class TestContributors:
                 provider="aws", account_id="a", period_start=date(2025, 3, 1),
                 period_end=date(2025, 3, 2), service="EC2", region="us-east-1",
                 usage_type="", cost_usd=200.0,
-                snapshot_time=datetime.now(UTC),
+                snapshot_time=datetime.now(timezone.utc),
             ),
             CostSnapshot(
                 provider="aws", account_id="a", period_start=date(2025, 3, 1),
                 period_end=date(2025, 3, 2), service="EC2", region="eu-west-1",
                 usage_type="", cost_usd=100.0,
-                snapshot_time=datetime.now(UTC),
+                snapshot_time=datetime.now(timezone.utc),
             ),
         ]
         result = top_regions(history)
@@ -384,7 +384,7 @@ class TestContributors:
                 type="compute", service="EC2", name=f"srv-{i}", region="us-east-1",
                 daily_cost=float((5 - i) * 10), monthly_cost_estimate=0,
                 currency="USD", state="running",
-                snapshot_time=datetime.now(UTC),
+                snapshot_time=datetime.now(timezone.utc),
             )
             for i in range(5)
         ]

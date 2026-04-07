@@ -3,6 +3,7 @@
 
 import json
 import logging
+from collections import defaultdict
 from typing import Any
 
 from llm.sanitizer import redact_sensitive_data, sanitize_cloud_string
@@ -67,20 +68,158 @@ def build_bill_prompt(context: dict[str, Any]) -> tuple[str, str]:
     return _SYSTEM_PROMPT, user_prompt
 
 
-# Groq free tier / most hosted models have ~6000 token input limits.
-# We cap list items and total payload to stay well within limits.
+# ---------------------------------------------------------------------------
+# Token budget configuration
+# ---------------------------------------------------------------------------
+
+# Maximum items per list section sent to the LLM
 MAX_LIST_ITEMS: int = 10
-MAX_PAYLOAD_CHARS: int = 8000
+
+# Target payload size in characters.  ~4 chars ≈ 1 token, so 4000 chars ≈
+# 1000 tokens — leaves room for system/user prompt and response.
+MAX_PAYLOAD_CHARS: int = 4000
+
+# Metadata keys worth sending to the LLM (everything else is stripped)
+_RESOURCE_KEYS = ("name", "service", "region", "state", "total_cost_usd", "percentage")
+_WASTE_KEYS = ("waste_type", "service", "region", "name", "estimated_monthly_savings")
+_ANOMALY_AGG_KEYS = ("service", "region", "severity", "occurrences", "avg_increase_pct", "latest_cost")
 
 
 def _build_payload(context: dict[str, Any]) -> str:
-    """Sanitize, truncate, and serialise context to a string safe for LLM sending."""
-    sanitized = _sanitize_context(context)
-    payload = json.dumps(sanitized, indent=2, default=str)
+    """Build a compact, token-efficient payload for LLM consumption.
+
+    Applies four optimisations:
+    1. **Field projection** — only sends fields the LLM needs (strips metadata,
+       tags, cpu_daily_values, resource_id, etc.)
+    2. **Anomaly aggregation** — groups duplicate anomalies by service/region
+       into a single entry with occurrence count
+    3. **Compact JSON** — no indentation, no unnecessary whitespace
+    4. **Smart truncation** — trims lowest-priority sections first instead of
+       cutting mid-JSON
+    """
+    compact = _compact_context(context)
+    sanitized = _sanitize_context(compact)
+    payload = json.dumps(sanitized, separators=(",", ":"), default=str)
     redacted = redact_sensitive_data(payload)
+
     if len(redacted) > MAX_PAYLOAD_CHARS:
-        redacted = redacted[:MAX_PAYLOAD_CHARS] + "\n... (truncated for length)"
-        logger.warning("LLM payload truncated to %d chars", MAX_PAYLOAD_CHARS)
+        # Progressively drop sections by priority (waste > anomalies > resources > services)
+        redacted = _smart_truncate(sanitized, MAX_PAYLOAD_CHARS)
+
+    return redacted
+
+
+def _compact_context(context: dict[str, Any]) -> dict[str, Any]:
+    """Project only LLM-relevant fields and aggregate anomalies."""
+    result: dict[str, Any] = {}
+
+    # Pass-through scalars
+    for key in ("provider", "period", "total_cost_usd"):
+        if key in context:
+            result[key] = context[key]
+
+    # Top services — already compact, keep as-is
+    if "top_services" in context:
+        result["top_services"] = [
+            {k: s[k] for k in ("name", "total_cost_usd", "percentage") if k in s}
+            for s in context["top_services"][:MAX_LIST_ITEMS]
+        ]
+
+    # Top resources — strip metadata bloat
+    if "top_resources" in context:
+        result["top_resources"] = [
+            {k: r[k] for k in _RESOURCE_KEYS if k in r}
+            for r in context["top_resources"][:MAX_LIST_ITEMS]
+        ]
+
+    # Anomalies — aggregate by service+region instead of one entry per day
+    if "anomalies" in context:
+        result["anomalies"] = _aggregate_anomalies(context["anomalies"])
+
+    # Waste — strip descriptions (LLM generates its own), keep only key facts
+    if "waste" in context:
+        result["waste"] = [
+            {k: w[k] for k in _WASTE_KEYS if k in w}
+            for w in context["waste"][:MAX_LIST_ITEMS]
+        ]
+        total_savings = sum(w.get("estimated_monthly_savings", 0) for w in context["waste"])
+        result["waste_total_monthly_savings"] = round(total_savings, 2)
+        result["waste_count"] = len(context["waste"])
+
+    return result
+
+
+def _aggregate_anomalies(anomalies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group anomalies by (service, region, severity) and summarise."""
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+
+    for a in anomalies:
+        detail = a.get("detail", {})
+        key = (
+            detail.get("service", a.get("resource_id", "unknown")),
+            detail.get("region", ""),
+            a.get("severity", "unknown"),
+        )
+        groups[key].append(a)
+
+    result = []
+    for (service, region, severity), items in groups.items():
+        increases = []
+        latest_cost = 0.0
+        for item in items:
+            detail = item.get("detail", {})
+            if "increase_pct" in detail:
+                increases.append(detail["increase_pct"])
+            if "current_cost" in detail:
+                latest_cost = max(latest_cost, detail["current_cost"])
+
+        result.append({
+            "service": service,
+            "region": region,
+            "severity": severity,
+            "occurrences": len(items),
+            "avg_increase_pct": round(sum(increases) / len(increases), 1) if increases else 0,
+            "latest_cost": round(latest_cost, 2),
+        })
+
+    # Sort by latest_cost descending
+    result.sort(key=lambda x: x["latest_cost"], reverse=True)
+    return result[:MAX_LIST_ITEMS]
+
+
+def _smart_truncate(context: dict[str, Any], budget: int) -> str:
+    """Drop lowest-priority sections until payload fits within *budget* chars."""
+    # Priority order: provider/period/total > services > resources > waste > anomalies
+    section_priority = ["anomalies", "waste", "top_resources", "top_services"]
+
+    working = dict(context)
+    for section in section_priority:
+        payload = json.dumps(working, separators=(",", ":"), default=str)
+        redacted = redact_sensitive_data(payload)
+        if len(redacted) <= budget:
+            return redacted
+
+        # Try halving the section first
+        if section in working and isinstance(working[section], list):
+            half = len(working[section]) // 2
+            if half > 0:
+                working[section] = working[section][:half]
+                payload = json.dumps(working, separators=(",", ":"), default=str)
+                redacted = redact_sensitive_data(payload)
+                if len(redacted) <= budget:
+                    return redacted
+
+            # Still too big — drop entirely
+            count = len(working.get(section, []))
+            working.pop(section, None)
+            working[f"{section}_omitted"] = f"{count} items omitted for token budget"
+
+    # Last resort: hard truncate
+    payload = json.dumps(working, separators=(",", ":"), default=str)
+    redacted = redact_sensitive_data(payload)
+    if len(redacted) > budget:
+        redacted = redacted[:budget]
+        logger.warning("LLM payload hard-truncated to %d chars", budget)
     return redacted
 
 
@@ -89,11 +228,7 @@ def _sanitize_context(context: dict[str, Any]) -> dict[str, Any]:
     if isinstance(context, dict):
         return {k: _sanitize_context(v) for k, v in context.items()}
     if isinstance(context, list):
-        truncated = context[:MAX_LIST_ITEMS]
-        result = [_sanitize_context(item) for item in truncated]
-        if len(context) > MAX_LIST_ITEMS:
-            result.append(f"... and {len(context) - MAX_LIST_ITEMS} more items")
-        return result  # type: ignore[return-value]
+        return [_sanitize_context(item) for item in context]  # type: ignore[return-value]
     if isinstance(context, str):
         return sanitize_cloud_string(context)  # type: ignore[return-value]
     return context

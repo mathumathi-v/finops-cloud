@@ -60,6 +60,7 @@ def summary(
     provider: str = typer.Option("aws", help="Cloud provider: aws|gcp|azure|oci|all"),
     output: str = typer.Option("table", help="Output format: json|table|plain"),
     since: str | None = typer.Option(None, help="Filter from date (YYYY-MM-DD)"),
+    account_id: str | None = typer.Option(None, help="Filter by account/subscription/project ID"),
 ) -> None:
     """Total cost breakdown by provider/service/region."""
     config = load_config()
@@ -68,25 +69,28 @@ def summary(
 
     from intelligence.contributors import top_regions, top_services
 
-    cost_history = storage.get_cost_history(provider, days=(date.today() - start).days)
+    cost_history = storage.get_cost_history(provider, days=(date.today() - start).days, account_id=account_id)
     total = sum(cs.cost_usd for cs in cost_history)
 
     regions = top_regions(cost_history)
     services = top_services(cost_history)
 
+    title_suffix = f" (account: {account_id})" if account_id else ""
+
     if output == "json":
         print_json({
             "total_cost_usd": round(total, 2),
+            "account_id": account_id,
             "top_services": [asdict(s) for s in services],
             "top_regions": [asdict(r) for r in regions],
         })
     elif output == "plain":
-        print_plain(f"Total cost: ${total:,.2f}")
+        print_plain(f"Total cost{title_suffix}: ${total:,.2f}")
         for s in services:
             print_plain(f"  {s.name}: ${s.total_cost_usd:,.2f} ({s.percentage}%)")
     else:
         print_table(
-            f"Cost Summary (since {start})",
+            f"Cost Summary (since {start}){title_suffix}",
             ["Service", "Cost (USD)", "% of Total"],
             [[s.name, f"${s.total_cost_usd:,.2f}", f"{s.percentage}%"] for s in services],
         )
@@ -102,6 +106,7 @@ def summary(
 def explain_spike(
     provider: str = typer.Option("aws", help="Cloud provider"),
     output: str = typer.Option("table", help="Output format: json|table|plain"),
+    account_id: str | None = typer.Option(None, help="Filter by account/subscription/project ID"),
 ) -> None:
     """Show anomalies with LLM explanation."""
     config = load_config()
@@ -109,7 +114,7 @@ def explain_spike(
 
     from intelligence.anomaly import detect_cost_spikes
 
-    cost_history = storage.get_cost_history(provider, days=14)
+    cost_history = storage.get_cost_history(provider, days=14, account_id=account_id)
     anomalies = detect_cost_spikes(cost_history)
 
     if not anomalies:
@@ -151,6 +156,7 @@ def explain_spike(
 def top_cost(
     provider: str = typer.Option("aws", help="Cloud provider"),
     output: str = typer.Option("table", help="Output format: json|table|plain"),
+    account_id: str | None = typer.Option(None, help="Filter by account/subscription/project ID"),
 ) -> None:
     """Top 10 most expensive resources."""
     config = load_config()
@@ -158,19 +164,34 @@ def top_cost(
 
     from intelligence.contributors import top_resources
 
-    resources = storage.get_resource_snapshots(provider)
+    resources = storage.get_resource_snapshots(provider, account_id=account_id)
     top = top_resources(resources)
 
     if output == "json":
         print_json([asdict(t) for t in top])
     elif output == "plain":
         for t in top:
-            print_plain(f"{t.name}: ${t.total_cost_usd:,.2f}/day ({t.percentage}%)")
+            print_plain(
+                f"{t.name} ({t.service}, {t.region}): "
+                f"${t.total_cost_usd:,.2f}/day ({t.percentage}%)  "
+                f"ID: {t.resource_id}"
+            )
     else:
         print_table(
             "Top 10 Most Expensive Resources",
-            ["Resource", "Daily Cost (USD)", "% of Total"],
-            [[t.name, f"${t.total_cost_usd:,.2f}", f"{t.percentage}%"] for t in top],
+            ["Resource", "Resource ID / ARN", "Service", "Region", "State", "Daily Cost (USD)", "% of Total"],
+            [
+                [
+                    t.name,
+                    t.resource_id,
+                    t.service,
+                    t.region,
+                    t.state,
+                    f"${t.total_cost_usd:,.2f}",
+                    f"{t.percentage}%",
+                ]
+                for t in top
+            ],
         )
 
 
@@ -178,6 +199,7 @@ def top_cost(
 def find_waste(
     provider: str = typer.Option("aws", help="Cloud provider"),
     output: str = typer.Option("table", help="Output format: json|table|plain"),
+    account_id: str | None = typer.Option(None, help="Filter by account/subscription/project ID"),
 ) -> None:
     """List waste findings with estimated savings."""
     config = load_config()
@@ -185,7 +207,7 @@ def find_waste(
 
     from intelligence.waste import find_all_waste
 
-    resources = storage.get_resource_snapshots(provider)
+    resources = storage.get_resource_snapshots(provider, account_id=account_id)
     findings = find_all_waste(resources)
 
     if not findings:
@@ -204,11 +226,11 @@ def find_waste(
     else:
         print_table(
             "Waste Findings",
-            ["Type", "Resource", "Service", "Region", "Est. Savings/Mo"],
+            ["Type", "Resource ID / ARN", "Service", "Region", "Description", "Est. Savings/Mo"],
             [
                 [
                     f.waste_type, f.resource_id, f.service,
-                    f.region, f"${f.estimated_monthly_savings:,.2f}",
+                    f.region, f.description, f"${f.estimated_monthly_savings:,.2f}",
                 ]
                 for f in findings
             ],
@@ -220,6 +242,7 @@ def find_waste(
 def forecast(
     provider: str = typer.Option("aws", help="Cloud provider"),
     output: str = typer.Option("table", help="Output format: json|table|plain"),
+    account_id: str | None = typer.Option(None, help="Filter by account/subscription/project ID"),
 ) -> None:
     """Show projected monthly cost."""
     config = load_config()
@@ -227,7 +250,7 @@ def forecast(
 
     from intelligence.forecast import compute_forecast
 
-    cost_history = storage.get_cost_history(provider, days=30)
+    cost_history = storage.get_cost_history(provider, days=30, account_id=account_id)
     results = compute_forecast(cost_history)
 
     if not results:
@@ -264,6 +287,7 @@ def forecast(
 def explain_bill(
     provider: str = typer.Option("aws", help="Cloud provider"),
     since: str | None = typer.Option(None, help="Filter from date (YYYY-MM-DD)"),
+    account_id: str | None = typer.Option(None, help="Filter by account/subscription/project ID"),
 ) -> None:
     """Full bill breakdown with LLM-powered reasoning."""
     config = load_config()
@@ -275,8 +299,8 @@ def explain_bill(
     from intelligence.waste import find_all_waste
 
     days = (date.today() - start).days
-    cost_history = storage.get_cost_history(provider, days=days)
-    resources = storage.get_resource_snapshots(provider)
+    cost_history = storage.get_cost_history(provider, days=days, account_id=account_id)
+    resources = storage.get_resource_snapshots(provider, account_id=account_id)
 
     total_cost = sum(cs.cost_usd for cs in cost_history)
     services = top_services(cost_history)
@@ -313,6 +337,14 @@ def explain_bill(
     console.print("[bold]Top Services:[/bold]")
     for s in services:
         console.print(f"  {s.name}: ${s.total_cost_usd:,.2f} ({s.percentage}%)")
+    if top_res:
+        console.print("\n[bold]Top Resources:[/bold]")
+        for r in top_res:
+            console.print(
+                f"  {r.name} [{r.service}, {r.region}]: "
+                f"${r.total_cost_usd:,.2f}/day ({r.percentage}%)"
+            )
+            console.print(f"    ID: {r.resource_id}")
     if anomalies:
         console.print(f"\n[bold]Anomalies: {len(anomalies)} detected[/bold]")
     if waste:
@@ -321,165 +353,111 @@ def explain_bill(
         console.print(f"\n[bold]{msg}[/bold]")
 
 
-@app.command()
-def collect(
-    provider: str = typer.Option("aws", help="Cloud provider"),
+def _collect_for_provider(
+    provider_name: str,
+    accounts: list[dict[str, Any]],
+    storage: SQLiteAdapter,
 ) -> None:
-    """Manually trigger a data collection run."""
-    config = load_config()
-    storage = _get_storage(config)
+    """Run cost + resource collection for every account of a single provider."""
+    start = date.today() - timedelta(days=30)
+    end = date.today()
 
-    if provider in ("aws", "all"):
-        aws_cfg = config.get("aws", {})
-        if not aws_cfg.get("enabled", False):
-            console.print("[yellow]AWS is not enabled in config.[/yellow]")
-            return
+    for acct in accounts:
+        acct_label = acct.get("name", "default")
+        console.print(f"\n[bold]— {provider_name.upper()} account: {acct_label}[/bold]")
 
-        from cloud.aws.collector import AWSCollector
-
-        console.print("Connecting to AWS...")
-        collector = AWSCollector(
-            profile=aws_cfg.get("profile"),
-            access_key_id=aws_cfg.get("access_key_id") or None,
-            secret_access_key=aws_cfg.get("secret_access_key") or None,
-            regions=aws_cfg.get("regions", ["us-east-1"]),
-        )
+        try:
+            collector = _build_collector(provider_name, acct)
+        except Exception as e:
+            console.print(f"[red]Failed to initialise collector: {e}[/red]")
+            continue
 
         if not collector.test_connection():
-            console.print("[red]AWS connection failed. Check credentials.[/red]")
-            return
+            console.print(f"[red]{provider_name.upper()} connection failed for '{acct_label}'. Check credentials.[/red]")
+            continue
 
-        console.print("Collecting cost data (last 30 days)...")
-        start = date.today() - timedelta(days=30)
-        end = date.today()
+        console.print("  Collecting cost data (last 30 days)...")
         try:
             costs = collector.collect_costs(start, end)
             storage.save_cost_snapshots(costs)
-            console.print(f"  Saved {len(costs)} cost snapshots.")
+            console.print(f"    Saved {len(costs)} cost snapshots.")
         except Exception as e:
-            console.print(f"[yellow]Cost collection failed: {e}[/yellow]")
-            console.print("[dim]Continuing with resource collection...[/dim]")
+            console.print(f"  [yellow]Cost collection failed: {e}[/yellow]")
 
-        console.print("Collecting resource data...")
+        console.print("  Collecting resource data...")
         try:
             resources = collector.collect_resources()
             storage.save_resource_snapshots(resources)
-            console.print(f"  Saved {len(resources)} resource snapshots.")
+            console.print(f"    Saved {len(resources)} resource snapshots.")
         except Exception as e:
-            console.print(f"[red]Resource collection failed: {e}[/red]")
+            console.print(f"  [red]Resource collection failed: {e}[/red]")
 
-        console.print("[green]AWS collection complete.[/green]")
+        console.print(f"  [green]{provider_name.upper()} account '{acct_label}' done.[/green]")
 
-    if provider in ("gcp", "all"):
-        gcp_cfg = config.get("gcp", {})
-        if not gcp_cfg.get("enabled", False):
-            console.print("[yellow]GCP is not enabled in config.[/yellow]")
-        else:
-            from cloud.gcp.collector import GCPCollector
 
-            console.print("Connecting to GCP...")
-            gcp_collector = GCPCollector(
-                project_id=gcp_cfg.get("project_id", ""),
-                credentials_file=gcp_cfg.get("credentials_file") or None,
-                billing_project_id=gcp_cfg.get("billing_project_id") or None,
-                billing_dataset=gcp_cfg.get("billing_dataset") or None,
-                billing_table=gcp_cfg.get("billing_table") or None,
-            )
+def _build_collector(provider_name: str, acct: dict[str, Any]) -> Any:
+    """Instantiate the right collector for a provider + account config dict."""
+    if provider_name == "aws":
+        from cloud.aws.collector import AWSCollector
+        return AWSCollector(
+            profile=acct.get("profile"),
+            access_key_id=acct.get("access_key_id") or None,
+            secret_access_key=acct.get("secret_access_key") or None,
+            regions=acct.get("regions", ["us-east-1"]),
+        )
+    if provider_name == "gcp":
+        from cloud.gcp.collector import GCPCollector
+        return GCPCollector(
+            project_id=acct.get("project_id", ""),
+            credentials_file=acct.get("credentials_file") or None,
+            billing_project_id=acct.get("billing_project_id") or None,
+            billing_dataset=acct.get("billing_dataset") or None,
+            billing_table=acct.get("billing_table") or None,
+        )
+    if provider_name == "azure":
+        from cloud.azure.collector import AzureCollector
+        return AzureCollector(
+            subscription_id=acct.get("subscription_id", ""),
+            tenant_id=acct.get("tenant_id") or None,
+            client_id=acct.get("client_id") or None,
+            client_secret=acct.get("client_secret") or None,
+        )
+    if provider_name == "oci":
+        from cloud.oci.collector import OCICollector
+        return OCICollector(
+            compartment_id=acct.get("compartment_id", ""),
+            tenancy_id=acct.get("tenancy_id") or None,
+            config_file=acct.get("config_file") or None,
+            profile=acct.get("profile") or None,
+        )
+    raise ValueError(f"Unknown provider: {provider_name}")
 
-            if not gcp_collector.test_connection():
-                console.print("[red]GCP connection failed. Check credentials.[/red]")
-            else:
-                console.print("Collecting GCP cost data (last 30 days)...")
-                start = date.today() - timedelta(days=30)
-                end = date.today()
-                gcp_costs = gcp_collector.collect_costs(start, end)
-                storage.save_cost_snapshots(gcp_costs)
-                console.print(f"  Saved {len(gcp_costs)} GCP cost snapshots.")
 
-                console.print("Collecting GCP resource data...")
-                gcp_resources = gcp_collector.collect_resources()
-                storage.save_resource_snapshots(gcp_resources)
-                console.print(f"  Saved {len(gcp_resources)} GCP resource snapshots.")
+@app.command()
+def collect(
+    provider: str = typer.Option("aws", help="Cloud provider: aws|gcp|azure|oci|all"),
+) -> None:
+    """Manually trigger a data collection run (supports multiple accounts per provider)."""
+    config = load_config()
+    storage = _get_storage(config)
 
-                console.print("[green]GCP collection complete.[/green]")
+    providers = ["aws", "gcp", "azure", "oci"] if provider == "all" else [provider]
 
-    if provider in ("azure", "all"):
-        azure_cfg = config.get("azure", {})
-        if not azure_cfg.get("enabled", False):
-            console.print("[yellow]Azure is not enabled in config.[/yellow]")
-        else:
-            from cloud.azure.collector import AzureCollector
+    for prov in providers:
+        prov_cfg = config.get(prov, {})
+        if not prov_cfg.get("enabled", False):
+            console.print(f"[yellow]{prov.upper()} is not enabled in config.[/yellow]")
+            continue
 
-            console.print("Connecting to Azure...")
-            azure_collector = AzureCollector(
-                subscription_id=azure_cfg.get("subscription_id", ""),
-                tenant_id=azure_cfg.get("tenant_id") or None,
-                client_id=azure_cfg.get("client_id") or None,
-                client_secret=azure_cfg.get("client_secret") or None,
-            )
+        accounts: list[dict[str, Any]] = prov_cfg.get("accounts", [])
+        if not accounts:
+            console.print(f"[yellow]No accounts configured for {prov.upper()}.[/yellow]")
+            continue
 
-            if not azure_collector.test_connection():
-                console.print("[red]Azure connection failed. Check credentials.[/red]")
-            else:
-                console.print("Collecting Azure cost data (last 30 days)...")
-                start = date.today() - timedelta(days=30)
-                end = date.today()
-                try:
-                    azure_costs = azure_collector.collect_costs(start, end)
-                    storage.save_cost_snapshots(azure_costs)
-                    console.print(f"  Saved {len(azure_costs)} Azure cost snapshots.")
-                except Exception as e:
-                    console.print(f"[yellow]Cost collection failed: {e}[/yellow]")
-                    console.print("[dim]Continuing with resource collection...[/dim]")
+        console.print(f"\n[bold]=== {prov.upper()}: {len(accounts)} account(s) ===[/bold]")
+        _collect_for_provider(prov, accounts, storage)
 
-                console.print("Collecting Azure resource data...")
-                try:
-                    azure_resources = azure_collector.collect_resources()
-                    storage.save_resource_snapshots(azure_resources)
-                    console.print(f"  Saved {len(azure_resources)} Azure resource snapshots.")
-                except Exception as e:
-                    console.print(f"[red]Resource collection failed: {e}[/red]")
-
-                console.print("[green]Azure collection complete.[/green]")
-
-    if provider in ("oci", "all"):
-        oci_cfg = config.get("oci", {})
-        if not oci_cfg.get("enabled", False):
-            console.print("[yellow]OCI is not enabled in config.[/yellow]")
-        else:
-            from cloud.oci.collector import OCICollector
-
-            console.print("Connecting to OCI...")
-            oci_collector = OCICollector(
-                compartment_id=oci_cfg.get("compartment_id", ""),
-                tenancy_id=oci_cfg.get("tenancy_id") or None,
-                config_file=oci_cfg.get("config_file") or None,
-                profile=oci_cfg.get("profile") or None,
-            )
-
-            if not oci_collector.test_connection():
-                console.print("[red]OCI connection failed. Check credentials.[/red]")
-            else:
-                console.print("Collecting OCI cost data (last 30 days)...")
-                start = date.today() - timedelta(days=30)
-                end = date.today()
-                try:
-                    oci_costs = oci_collector.collect_costs(start, end)
-                    storage.save_cost_snapshots(oci_costs)
-                    console.print(f"  Saved {len(oci_costs)} OCI cost snapshots.")
-                except Exception as e:
-                    console.print(f"[yellow]Cost collection failed: {e}[/yellow]")
-                    console.print("[dim]Continuing with resource collection...[/dim]")
-
-                console.print("Collecting OCI resource data...")
-                try:
-                    oci_resources = oci_collector.collect_resources()
-                    storage.save_resource_snapshots(oci_resources)
-                    console.print(f"  Saved {len(oci_resources)} OCI resource snapshots.")
-                except Exception as e:
-                    console.print(f"[red]Resource collection failed: {e}[/red]")
-
-                console.print("[green]OCI collection complete.[/green]")
+    console.print("\n[green bold]Collection complete.[/green bold]")
 
 
 @app.command()

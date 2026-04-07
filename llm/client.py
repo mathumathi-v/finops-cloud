@@ -61,7 +61,7 @@ class LLMClient:
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
-            max_tokens=2000,
+            max_tokens=1024,
         )
         content = response.choices[0].message.content
         return content or ""
@@ -72,7 +72,7 @@ class LLMClient:
         client = anthropic.Anthropic(api_key=self._api_key)
         response = client.messages.create(
             model=self._model,
-            max_tokens=2000,
+            max_tokens=1024,
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
         )

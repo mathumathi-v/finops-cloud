@@ -84,8 +84,11 @@ class AzureCollector(CloudCollector):
         return self._cost_collector.collect_costs(start_date, end_date)
 
     def collect_resources(self) -> list[ResourceSnapshot]:
-        """Fetch live Azure resource metadata."""
-        return self._resource_collector.collect_resources()
+        """Fetch live Azure resource metadata and utilisation metrics."""
+        snapshots = self._resource_collector.collect_resources()
+        snapshots = self._resource_collector.collect_cpu_metrics(snapshots)
+        snapshots = self._resource_collector.collect_resource_metrics(snapshots)
+        return snapshots
 
     def test_connection(self) -> bool:
         """Verify Azure credentials by listing subscription details."""

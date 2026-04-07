@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from datetime import UTC, date, datetime
+from datetime import date, datetime, timezone
 
 from cost_model.models import CostSnapshot
 
@@ -106,7 +106,7 @@ class GCPCostCollector:
                     region=region,
                     usage_type="",
                     cost_usd=cost,
-                    snapshot_time=datetime.now(UTC),
+                    snapshot_time=datetime.now(timezone.utc),
                 )
             )
 

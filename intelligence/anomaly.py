@@ -3,7 +3,7 @@
 
 import logging
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from cost_model.models import AnomalyEvent, CostSnapshot, ResourceSnapshot
 from intelligence.constants import (
@@ -52,7 +52,7 @@ def detect_cost_spikes(cost_history: list[CostSnapshot]) -> list[AnomalyEvent]:
                             ),
                             "period": curr.period_start.isoformat(),
                         },
-                        detected_at=datetime.now(UTC),
+                        detected_at=datetime.now(timezone.utc),
                     )
                 )
 
@@ -80,7 +80,7 @@ def detect_new_high_cost_resources(
                         "daily_cost": r.daily_cost,
                         "region": r.region,
                     },
-                    detected_at=datetime.now(UTC),
+                    detected_at=datetime.now(timezone.utc),
                 )
             )
 
@@ -122,7 +122,7 @@ def detect_sudden_scaling(
                         "current_count": curr_count,
                         "multiplier": round(curr_count / prev_count, 1),
                     },
-                    detected_at=datetime.now(UTC),
+                    detected_at=datetime.now(timezone.utc),
                 )
             )
 

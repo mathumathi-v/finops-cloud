@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from cloud.pricing import PricingProvider
 from cost_model.models import ResourceSnapshot
@@ -272,11 +272,11 @@ class AzureResourceCollector:
         self._subscription_id = subscription_id
         self._credential = credential
         self._pricing = pricing_provider
-        self._snapshot_time = datetime.now(UTC)
+        self._snapshot_time = datetime.now(timezone.utc)
 
     def collect_resources(self) -> list[ResourceSnapshot]:
         """Collect all supported Azure resources for the subscription."""
-        self._snapshot_time = datetime.now(UTC)
+        self._snapshot_time = datetime.now(timezone.utc)
         snapshots: list[ResourceSnapshot] = []
         collectors = [
             ("VMs", self._collect_vms),
@@ -982,7 +982,7 @@ class AzureResourceCollector:
             logger.warning("Could not create Azure Monitor client", exc_info=True)
             return snapshots
 
-        now = datetime.now(UTC)
+        now = datetime.now(timezone.utc)
         start = now - timedelta(days=IDLE_CPU_LOOKBACK_DAYS)
         timespan = f"{start.isoformat()}/{now.isoformat()}"
 
@@ -1004,12 +1004,79 @@ class AzureResourceCollector:
                             if dp.average is not None:
                                 values.append(dp.average)
                 if values:
-                    snap.metadata["avg_cpu_percent"] = round(
-                        sum(values) / len(values), 2,
-                    )
+                    from cloud.metrics_util import enrich_from_daily_avg_list
+                    enrich_from_daily_avg_list(snap, values, start)
             except Exception:
                 logger.debug(
                     "Azure Monitor CPU lookup failed for %s", snap.resource_id, exc_info=True,
                 )
+
+        return snapshots
+
+    def collect_resource_metrics(self, snapshots: list[ResourceSnapshot]) -> list[ResourceSnapshot]:
+        """Enrich non-compute Azure resources with utilisation metrics.
+
+        Covers: AzureSQL (DTU/CPU, connections), LoadBalancer (data path),
+        FunctionApp (function execution count).
+        """
+        try:
+            from azure.mgmt.monitor import MonitorManagementClient  # type: ignore[import-untyped]
+        except ImportError:
+            logger.debug("azure-mgmt-monitor not installed, skipping resource metrics")
+            return snapshots
+
+        try:
+            client = MonitorManagementClient(self._credential, self._subscription_id)  # type: ignore[arg-type]
+        except Exception:
+            logger.warning("Could not create Azure Monitor client for resource metrics", exc_info=True)
+            return snapshots
+
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=IDLE_CPU_LOOKBACK_DAYS)
+        timespan = f"{start.isoformat()}/{now.isoformat()}"
+
+        _metric_map = {
+            "AzureSQL": [
+                ("dtu_consumption_percent", "avg_dtu_percent", "Average"),
+                ("connection_successful", "avg_connections", "Average"),
+            ],
+            "CosmosDB": [
+                ("TotalRequests", "total_requests", "Count"),
+            ],
+            "LoadBalancer": [
+                ("ByteCount", "total_bytes", "Total"),
+            ],
+            "FunctionApp": [
+                ("FunctionExecutionCount", "total_invocations", "Total"),
+            ],
+        }
+
+        for snap in snapshots:
+            metrics = _metric_map.get(snap.service)
+            if not metrics:
+                continue
+            for metric_name, meta_key, aggregation in metrics:
+                try:
+                    result = client.metrics.list(
+                        resource_uri=snap.resource_id,
+                        timespan=timespan,
+                        interval="P1D",
+                        metricnames=metric_name,
+                        aggregation=aggregation,
+                    )
+                    values: list[float] = []
+                    for metric in result.value:
+                        for ts in metric.timeseries:
+                            for dp in ts.data:
+                                val = getattr(dp, aggregation.lower(), None) or dp.average
+                                if val is not None:
+                                    values.append(val)
+                    if values:
+                        if "total" in meta_key:
+                            snap.metadata[meta_key] = round(sum(values))
+                        else:
+                            snap.metadata[meta_key] = round(sum(values) / len(values), 2)
+                except Exception:
+                    logger.debug("Azure metric %s failed for %s", metric_name, snap.resource_id, exc_info=True)
 
         return snapshots

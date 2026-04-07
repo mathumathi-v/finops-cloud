@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from cost_model.models import ResourceSnapshot
 from intelligence.constants import IDLE_CPU_LOOKBACK_DAYS
@@ -153,11 +153,11 @@ class OCIResourceCollector:
         """
         self._compartment_id = compartment_id
         self._config = config
-        self._snapshot_time = datetime.now(UTC)
+        self._snapshot_time = datetime.now(timezone.utc)
 
     def collect_resources(self) -> list[ResourceSnapshot]:
         """Collect all supported OCI resources for the compartment."""
-        self._snapshot_time = datetime.now(UTC)
+        self._snapshot_time = datetime.now(timezone.utc)
         snapshots: list[ResourceSnapshot] = []
         collectors = [
             ("Compute instances", self._collect_instances),
@@ -622,7 +622,7 @@ class OCIResourceCollector:
             logger.warning("Could not create OCI Monitoring client", exc_info=True)
             return snapshots
 
-        now = datetime.now(UTC)
+        now = datetime.now(timezone.utc)
         start = now - timedelta(days=IDLE_CPU_LOOKBACK_DAYS)
 
         for snap in snapshots:
@@ -644,12 +644,74 @@ class OCIResourceCollector:
                         if dp.value is not None:
                             values.append(float(dp.value))
                 if values:
-                    snap.metadata["avg_cpu_percent"] = round(
-                        sum(values) / len(values), 2,
-                    )
+                    from cloud.metrics_util import enrich_from_daily_avg_list
+                    enrich_from_daily_avg_list(snap, values, start)
             except Exception:
                 logger.debug(
                     "OCI Monitoring CPU lookup failed for %s", snap.resource_id, exc_info=True,
                 )
+
+        return snapshots
+
+    def collect_resource_metrics(self, snapshots: list[ResourceSnapshot]) -> list[ResourceSnapshot]:
+        """Enrich non-compute OCI resources with utilisation metrics.
+
+        Covers: AutonomousDB (CPU, sessions), LoadBalancer (request count).
+        """
+        try:
+            import oci  # type: ignore[import-untyped]
+        except ImportError:
+            logger.debug("oci SDK not available, skipping resource metrics")
+            return snapshots
+
+        try:
+            monitoring = oci.monitoring.MonitoringClient(self._config)
+        except Exception:
+            logger.warning("Could not create OCI Monitoring client for resource metrics", exc_info=True)
+            return snapshots
+
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=IDLE_CPU_LOOKBACK_DAYS)
+
+        _metric_map = {
+            "AutonomousDB": [
+                ("oci_autonomous_database", "CpuUtilization[1d].mean()", "avg_cpu_percent"),
+                ("oci_autonomous_database", "Sessions[1d].mean()", "avg_sessions"),
+            ],
+            "LoadBalancer": [
+                ("oci_lbaas", "HttpRequests[1d].sum()", "total_requests"),
+            ],
+        }
+
+        for snap in snapshots:
+            metrics = _metric_map.get(snap.service)
+            if not metrics:
+                continue
+            for namespace, query_tpl, meta_key in metrics:
+                try:
+                    query = query_tpl.replace("resourceId", snap.resource_id)
+                    if "{" not in query:
+                        query = query.replace("[", f'{{resourceId = "{snap.resource_id}"}}[', 1)
+                    resp = monitoring.summarize_metrics_data(
+                        compartment_id=self._compartment_id,
+                        summarize_metrics_data_details=oci.monitoring.models.SummarizeMetricsDataDetails(
+                            namespace=namespace,
+                            query=query,
+                            start_time=start.isoformat(),
+                            end_time=now.isoformat(),
+                        ),
+                    )
+                    values: list[float] = []
+                    for ts in resp.data:
+                        for dp in ts.aggregated_datapoints:
+                            if dp.value is not None:
+                                values.append(float(dp.value))
+                    if values:
+                        if "total" in meta_key:
+                            snap.metadata[meta_key] = round(sum(values))
+                        else:
+                            snap.metadata[meta_key] = round(sum(values) / len(values), 2)
+                except Exception:
+                    logger.debug("OCI metric %s failed for %s", query_tpl, snap.resource_id, exc_info=True)
 
         return snapshots

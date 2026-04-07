@@ -70,7 +70,7 @@ your billing data on their servers. finops-agent is different:
 
 | Requirement | Minimum | Notes |
 |-------------|---------|-------|
-| **Python** | 3.11+ | 3.12 also supported |
+| **Python** | 3.10+ | 3.11, 3.12 also supported |
 | **pip** | 22.0+ | Comes with Python 3.11 |
 | **OS** | Linux, macOS, Windows (WSL) | Tested on Ubuntu 22.04/24.04, macOS 14+ |
 | **Disk** | ~100 MB | For dependencies + SQLite database |
@@ -84,7 +84,7 @@ Check your version first:
 python3 --version
 ```
 
-If you're on Python 3.10 or older (common on Ubuntu 22.04), install 3.11 first:
+If you're on Python 3.9 or older, install 3.10+ first:
 
 ```bash
 # Ubuntu / Debian
@@ -157,7 +157,7 @@ pip install .
 Verify the installation:
 
 ```bash
-pip show finops-agent   # should show Version: 0.3.2
+pip show finops-agent   # should show Version: 0.5.0
 finops --help
 ```
 
@@ -239,12 +239,14 @@ See [LLM Setup](#llm-setup).
 ### 4. Collect and analyze
 
 ```bash
-finops collect               # Pull cost + resource data
-finops summary               # Where is the money going?
-finops explain-bill          # AI-powered full bill breakdown
-finops find-waste            # Unattached disks, idle resources
-finops explain-spike         # What caused that cost jump?
-finops forecast              # What will next month cost?
+finops collect                         # Pull cost + resource data + utilisation metrics
+finops summary                         # Where is the money going?
+finops summary --account-id 111111     # Filter to one account
+finops explain-bill                    # AI-powered full bill breakdown
+finops top-cost                        # Top 10 resources with ARN/Resource ID
+finops find-waste                      # 12 pattern-based waste detection rules
+finops explain-spike                   # What caused that cost jump?
+finops forecast                        # What will next month cost?
 ```
 
 ---
@@ -290,7 +292,8 @@ Or use this minimal custom policy covering exactly what the agent calls:
         "s3:GetBucketLocation",
         "lambda:ListFunctions",
         "cloudfront:ListDistributions",
-        "apigateway:GET"
+        "apigateway:GET",
+        "cloudwatch:GetMetricStatistics"
       ],
       "Resource": "*"
     }
@@ -366,8 +369,9 @@ AWS Cost Explorer API
 
 EC2 / EBS / ELB / NAT / EKS / RDS / S3 / Lambda / VPN / CloudFront / API Gateway
   └─ ResourceSnapshot (per resource, with state + cost estimate)
-       └─ SQLite resource_snapshots table
-            └─ intelligence engine (waste detection)
+       └─ CloudWatch metrics enrichment (CPU, connections, IOPS, requests, invocations)
+            └─ SQLite resource_snapshots table (deduplicated via unique indexes)
+                 └─ intelligence engine (12 waste detection rules)
 ```
 
 ---
@@ -750,12 +754,12 @@ finops config set llm.api_key ollama
 
 | Command | Description |
 |---------|-------------|
-| `finops collect` | Pull cost data (last 30 days) and resource metadata |
+| `finops collect` | Pull cost data (last 30 days), resource metadata, and utilisation metrics |
 | `finops summary` | Cost breakdown by service and region |
 | `finops explain-bill` | Full bill analysis with LLM-powered reasoning |
 | `finops explain-spike` | Detect cost anomalies and explain likely causes |
-| `finops top-cost` | Top 10 most expensive resources |
-| `finops find-waste` | Find unattached disks, stopped instances/databases, idle NATs |
+| `finops top-cost` | Top 10 most expensive resources (with Resource ID / ARN) |
+| `finops find-waste` | Pattern-based waste detection across all resource types |
 | `finops forecast` | Monthly cost projection with trend analysis |
 | `finops config set` | Set a configuration value |
 | `finops config get` | Read a configuration value |
@@ -767,6 +771,19 @@ finops config set llm.api_key ollama
 --provider aws|gcp|azure|oci|all  # Filter by cloud provider (default: aws)
 --output json|table|plain         # Output format (default: table)
 --since YYYY-MM-DD                # Filter from date
+--account-id ID                   # Filter by account/subscription/project ID (omit for all)
+```
+
+### Multi-account support
+
+All analysis commands accept `--account-id` to filter data to a single account.
+Omit it to see aggregated data across all configured accounts.
+
+```bash
+finops summary --provider aws                              # All AWS accounts combined
+finops summary --provider aws --account-id 111111111111    # Production account only
+finops top-cost --provider azure --account-id aaaa-bbbb    # Specific Azure subscription
+finops find-waste --provider gcp --account-id my-project   # Specific GCP project
 ```
 
 ### Output formats
@@ -791,20 +808,38 @@ finops summary --output plain     # Plain text for piping / grep
 
 ### Waste detection (deterministic, no LLM required)
 
+The agent runs 12 waste detection rules grouped into **state-based** and **pattern-based** detectors. Pattern-based rules analyse utilisation metrics over a 14-day lookback window (CloudWatch, Azure Monitor, Cloud Monitoring, OCI Monitoring).
+
+#### State-based detectors
+
 | Rule | Trigger | Estimated savings |
 |------|---------|------------------|
 | Unattached disk | EBS/PD/ManagedDisk/BlockVolume with no attachments | ~$0.08–$0.17/GB/month |
-| Stopped instance | EC2/VM/GCE/Compute stopped (disk charges continue) | Varies |
-| Idle NAT Gateway | NAT with < 1GB transfer/day | ~$32.40/month each |
+| Stopped instance | EC2/VM/GCE/Compute stopped > 7 days (urgency scales with age) | Varies by instance type |
 | Unused Elastic IP | EIP not attached to a running instance | ~$3.60/month each |
-| Idle instance | EC2/VM/GCE/Compute with avg CPU < 5% over 14 days | Full instance cost |
 | Stopped database | RDS/AzureSQL/CloudSQL/AutonomousDB in stopped state | Storage charges continue |
+
+#### Pattern-based detectors (require metrics from `collect`)
+
+| Rule | What it analyses | Trigger | Applies to |
+|------|-----------------|---------|------------|
+| Idle instance | Avg CPU AND P95 CPU over 14 days | avg < 5% AND P95 < 15% | EC2, GCE, VMs, Compute |
+| Off-hours idle | Weekday vs weekend CPU split | Busy weekdays, idle weekends (< 3%) | EC2, GCE, VMs, Compute |
+| Declining usage | CPU trend first-half vs second-half | Dropped > 40% over 14 days | EC2, GCE, VMs, Compute |
+| Idle database | Connections + CPU over 14 days | Near-zero connections OR CPU < 5% | RDS, CloudSQL, AzureSQL, AutonomousDB |
+| Idle load balancer | Request count over 14 days | Zero requests over 14 days | ELB/ALB, Azure LB, GCP LB, OCI LB |
+| Idle NAT (traffic) | Bytes processed from CloudWatch | < 1 MB/day average | NAT Gateway |
+| Idle attached disk | Read + write IOPS over 14 days | Zero I/O on attached volume | EBS |
+| Zero-invocation function | Invocation count over 14 days | Zero invocations | Lambda, Cloud Functions, Function Apps |
+
+The idle instance detector uses **P95 + average** to avoid false positives — a server that's idle 13 days but spikes for batch processing on day 14 is NOT flagged.
 
 ### Forecasting
 
 - Monthly projection based on average daily cost over last 14 days
 - Linear regression trend over last 14 days
 - Trend classification: increasing, decreasing, or stable
+- Per-account forecast when multiple accounts are configured
 
 ---
 
@@ -863,6 +898,7 @@ finops-agent/
 │   └── output.py               # Table, JSON, plain output helpers
 ├── cloud/
 │   ├── base.py                 # CloudCollector abstract base class
+│   ├── metrics_util.py         # Shared CPU enrichment (P95, trend, weekday/weekend)
 │   ├── aws/
 │   │   ├── collector.py        # Unified AWS collector
 │   │   ├── cost_collector.py   # Cost Explorer API → CostSnapshot
@@ -883,7 +919,7 @@ finops-agent/
 │   └── models.py               # ResourceSnapshot, CostSnapshot, SavingsPlanSnapshot, AnomalyEvent
 ├── intelligence/
 │   ├── anomaly.py              # Cost spikes, high-cost resources, scaling events
-│   ├── waste.py                # Unattached disks, stopped instances, idle NATs
+│   ├── waste.py                # 12 waste detection rules (state + pattern-based)
 │   ├── forecast.py             # Linear regression projections
 │   ├── contributors.py         # Top services, regions, resources by cost
 │   └── constants.py            # All configurable thresholds in one place
@@ -919,37 +955,58 @@ The agent looks for config in this order:
 1. `~/.finops-agent/config.yaml` (user config, created by `finops config set`)
 2. `./config.yaml` (local project config)
 
+Each provider supports **multiple accounts** via the `accounts` list. The old
+single-account format (flat keys) is still supported and auto-migrated at load time.
+
 ```yaml
+# Multi-account format (recommended)
 aws:
   enabled: true
-  profile: default              # AWS CLI profile (mutually exclusive with access_key_id)
-  access_key_id: ""             # Explicit credentials (optional)
-  secret_access_key: ""
-  regions:
-    - us-east-1
-    - eu-west-2
+  accounts:
+    - name: production            # Friendly label (shown during collect)
+      profile: prod-profile       # AWS CLI profile
+      regions:
+        - us-east-1
+        - eu-west-2
+    - name: staging
+      access_key_id: "AKIA..."    # Explicit credentials
+      secret_access_key: "..."
+      regions:
+        - us-east-1
 
 gcp:
   enabled: false
-  project_id: ""                # GCP project ID
-  credentials_file: ""          # Path to service account JSON (empty = use ADC)
-  billing_project_id: ""        # Project hosting the BigQuery dataset (defaults to project_id)
-  billing_dataset: ""           # BigQuery dataset name (e.g. gcp_billing_export)
-  billing_table: ""             # BigQuery table name (e.g. gcp_billing_export_v1_ABCDEF_123456)
+  accounts:
+    - name: main-project
+      project_id: "my-project-123"
+      credentials_file: ""        # Path to service account JSON (empty = use ADC)
+      billing_project_id: ""      # Project hosting the BigQuery dataset
+      billing_dataset: ""         # BigQuery dataset name
+      billing_table: ""           # BigQuery table name
+    - name: data-project
+      project_id: "data-proj-456"
+      billing_dataset: "billing"
+      billing_table: "gcp_billing_export_v1_XXXXXX"
 
 azure:
   enabled: false
-  subscription_id: ""
-  tenant_id: ""
-  client_id: ""                 # Service principal app ID (empty = use az login)
-  client_secret: ""
+  accounts:
+    - name: prod-subscription
+      subscription_id: "aaaa-bbbb-cccc"
+      tenant_id: ""
+      client_id: ""               # Service principal app ID (empty = use az login)
+      client_secret: ""
+    - name: dev-subscription
+      subscription_id: "dddd-eeee-ffff"
 
 oci:
   enabled: false
-  compartment_id: ""            # Compartment OCID to scan for resources
-  tenancy_id: ""                # Tenancy OCID (defaults to value in OCI config)
-  config_file: ""               # Path to OCI config (empty = ~/.oci/config)
-  profile: ""                   # OCI config profile (empty = DEFAULT)
+  accounts:
+    - name: prod-compartment
+      compartment_id: "ocid1.compartment.oc1..aaa"
+      tenancy_id: ""              # Tenancy OCID (defaults to value in OCI config)
+      config_file: ""             # Path to OCI config (empty = ~/.oci/config)
+      profile: ""                 # OCI config profile (empty = DEFAULT)
 
 llm:
   provider: local               # openai | anthropic | bedrock | local (for Groq/Gemini/Ollama)
@@ -1091,6 +1148,12 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting and the full security
 - [x] Docker image with multi-stage build (all cloud providers included)
 - [x] CloudWatch/Cloud Monitoring integration for CPU-based idle instance detection (AWS, Azure, GCP, OCI)
 - [x] Dynamic pricing API integration (AWS Pricing API, Azure Retail Prices, GCP Cloud Billing Catalog) with in-memory cache and hardcoded fallback
+- [x] Multi-account support (multiple AWS accounts, GCP projects, Azure subscriptions, OCI compartments)
+- [x] Resource ID / ARN in cost analysis output (top-cost, find-waste, explain-bill)
+- [x] Idempotent data collection (deduplication via unique indexes, safe to run repeatedly)
+- [x] Pattern-based waste detection: P95+avg CPU, weekday/weekend split, declining trend, duration-aware stopped instances
+- [x] Full resource metrics collection: databases (connections, CPU), load balancers (request count), NAT gateways (traffic), EBS (IOPS), Lambda (invocations), S3 (size)
+- [x] 12 waste detection rules covering compute, databases, networking, storage, and serverless
 - [ ] Scheduler daemon mode (`finops-agent run --mode daemon`)
 - [ ] Kubernetes CronJob deployment
 - [ ] Helm chart
